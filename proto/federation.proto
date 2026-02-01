@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package federation.v1;
+
+option go_package = "medimage/federation/pkg/federationv1;federationv1";
+
+// FederationService provides file storage and retrieval for the medical image federation.
+service FederationService {
+  // Health check for MinIO and service.
+  rpc Health(HealthRequest) returns (HealthResponse);
+  // Check if a file with given SHA256 already exists (duplicate detection).
+  rpc CheckDuplicate(CheckDuplicateRequest) returns (CheckDuplicateResponse);
+  // Upload a file (streaming). Rejects if duplicate SHA256 when reject_duplicate is true.
+  rpc UploadFile(stream UploadChunk) returns (UploadResponse);
+  // Download a file by object key (streaming).
+  rpc DownloadFile(DownloadRequest) returns (stream DownloadChunk);
+  // List objects in a bucket (optional prefix).
+  rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string message = 2;
+  map<string, bool> minio_nodes = 3;
+}
+
+message CheckDuplicateRequest {
+  string sha256_hex = 1;
+  string bucket = 2;
+  string prefix = 3;  // optional key prefix to scope search
+}
+
+message CheckDuplicateResponse {
+  bool exists = 1;
+  string object_key = 2;  // set if exists
+}
+
+message UploadChunk {
+  string bucket = 1;
+  string object_key = 2;
+  string content_type = 3;
+  bool reject_duplicate = 4;  // if true, reject when SHA256 already exists
+  bytes data = 5;             // chunk data; last chunk can be empty to signal done
+  string sha256_hex = 6;      // full file SHA256 (send with first or last chunk)
+}
+
+message UploadResponse {
+  bool success = 1;
+  string message = 2;
+  string object_key = 3;
+  bool rejected_duplicate = 4;
+}
+
+message DownloadRequest {
+  string bucket = 1;
+  string object_key = 2;
+}
+
+message DownloadChunk {
+  bytes data = 1;
+}
+
+message ListObjectsRequest {
+  string bucket = 1;
+  string prefix = 2;
+  int32 max_keys = 3;
+}
+
+message ObjectInfo {
+  string key = 1;
+  int64 size = 2;
+  string etag = 3;
+}
+
+message ListObjectsResponse {
+  repeated ObjectInfo objects = 1;
+}

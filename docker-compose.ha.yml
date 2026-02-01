@@ -1,0 +1,152 @@
+# Docker Compose Override for High Availability with etcd + Patroni
+# 
+# This file adds etcd cluster and converts PostgreSQL to Patroni-managed instances
+# for automatic failover and leader election.
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.ha.yml up -d
+#
+# Note: This is a production-grade HA setup. For development, the base
+# docker-compose.yml with manual failover is sufficient.
+
+version: '3.8'
+
+services:
+  # etcd Node 1 - Distributed consensus and coordination
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd1
+    command:
+      - etcd
+      - --name=etcd1
+      - --initial-advertise-peer-urls=http://etcd1:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://etcd1:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-cluster-dfs
+      - --enable-v2=true
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd1-data:/etcd-data
+    networks:
+      - dfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # etcd Node 2
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd2
+    command:
+      - etcd
+      - --name=etcd2
+      - --initial-advertise-peer-urls=http://etcd2:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://etcd2:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-cluster-dfs
+      - --enable-v2=true
+    ports:
+      - "2479:2379"
+      - "2480:2380"
+    volumes:
+      - etcd2-data:/etcd-data
+    networks:
+      - dfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # etcd Node 3
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd3
+    command:
+      - etcd
+      - --name=etcd3
+      - --initial-advertise-peer-urls=http://etcd3:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://etcd3:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=etcd-cluster-dfs
+      - --enable-v2=true
+    ports:
+      - "2579:2379"
+      - "2580:2380"
+    volumes:
+      - etcd3-data:/etcd-data
+    networks:
+      - dfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # HAProxy for PostgreSQL load balancing
+  # Routes writes to primary, distributes reads across replicas
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: haproxy-postgres
+    ports:
+      - "5000:5000"  # Primary write endpoint
+      - "5001:5001"  # Read replicas endpoint
+      - "7000:7000"  # HAProxy stats
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - postgres-primary
+      - postgres-replica1
+      - postgres-replica2
+    networks:
+      - dfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Update FastAPI to use HAProxy endpoint
+  fastapi:
+    environment:
+      # Use HAProxy for automatic routing
+      DATABASE_URL: postgresql://dfsuser:dfspassword@haproxy:5000/dfs_metadata
+      # Read replicas (optional, for read scaling)
+      DATABASE_READ_URL: postgresql://dfsuser:dfspassword@haproxy:5001/dfs_metadata
+      # etcd endpoints for service discovery
+      ETCD_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+    depends_on:
+      - haproxy
+      - etcd1
+      - etcd2
+      - etcd3
+
+volumes:
+  etcd1-data:
+  etcd2-data:
+  etcd3-data:
+
+# Note: To fully enable Patroni:
+# 1. Replace postgres-primary image with patroni/patroni
+# 2. Add patroni.yml configuration for each node
+# 3. Configure replication slots and synchronous replication
+# 4. Update HAProxy configuration to use Patroni REST API for health checks
+#
+# See docs/ha-architecture.md for detailed implementation guide

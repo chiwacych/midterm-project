@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MedImage Federation</title>
+    <script>
+      // Apply theme before page renders to prevent flash
+      (function() {
+        const theme = localStorage.getItem('theme') || 'dark';
+        let effectiveTheme = 'dark';
+        
+        if (theme === 'auto') {
+          effectiveTheme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        } else {
+          effectiveTheme = theme;
+        }
+        
+        if (effectiveTheme === 'light') {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,468 @@
+import { useEffect, useState } from 'react'
+import { useAuth } from '../contexts/AuthContext'
+import { 
+  listConsents, 
+  grantConsent, 
+  revokeConsent, 
+  type ConsentItem, 
+  type GrantConsentBody
+} from '../api/client'
+
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  padding: '0.5rem 0.75rem',
+  marginBottom: '0.75rem',
+  background: 'var(--bg)',
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  color: 'var(--text)',
+}
+
+export function Consent() {
+  const { user } = useAuth()
+  const [list, setList] = useState<ConsentItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [grantScope, setGrantScope] = useState('all')
+  const [grantToRole, setGrantToRole] = useState('doctor')
+  const [grantExpires, setGrantExpires] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [revokingId, setRevokingId] = useState<number | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const data = await listConsents()
+      setList(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadPatients = async () => {
+    setSearchingPatients(true)
+    setError(null)
+    try {
+      const data = await listPatients(searchQuery)
+      setPatients(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load patients')
+    } finally {
+      setSearchingPatients(false)
+    }
+  }
+
+  const handlePatientSearch = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!patientSearchForm.full_name) {
+      setError('Patient name is required')
+      return
+    }
+    
+    setSearchingPatients(true)
+    setError(null)
+    try {
+      const results = await searchPatients(patientSearchForm)
+      setPatients(results)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Patient search failed')
+    } finally {
+      setSearchingPatients(false)
+    }
+  }
+
+  const loadPatientFiles = async (patient: Patient) => {
+    setLoadingFiles(true)
+    try {
+      const response = await listFiles(patient.id)
+      setPatientFiles(response.files)
+    } catch (err) {
+      console.error('Failed to load patient files:', err)
+      setError('Failed to load patient files')
+    } finally {
+      setLoadingFiles(false)
+    }
+  }
+
+  const handleSelectPatient = (patient: Patient) => {
+    setSelectedPatient(patient)
+    setSelectedFiles([])
+    loadPatientFiles(patient)
+  }
+
+  const toggleFileSelection = (fileId: number) => {
+    setSelectedFiles(prev => 
+      prev.includes(fileId)
+        ? prev.filter(id => id !== fileId)
+        : [...prev, fileId]
+    )
+  }
+
+  const toggleAllFiles = () => {
+    if (selectedFiles.length === patientFiles.length) {
+      setSelectedFiles([])
+    } else {
+      setSelectedFiles(patientFiles.map(f => f.id))
+    }
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  const handleGrant = (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    
+    // Validate file selection if patient is selected
+    if (selectedPatient && selectedFiles.length === 0) {
+      setError('Please select at least one file to grant access to')
+      return
+    }
+    
+    setSubmitting(true)
+    const body: GrantConsentBody = {
+      granted_to_role: grantToRole || undefined,
+    }
+    
+    // Build scope based on selection
+    if (selectedPatient && selectedFiles.length > 0) {
+      const fileScopes = selectedFiles.map(fileId => `file:${fileId}`).join(',')
+      body.scope = `patient:${selectedPatient.id};files:${fileScopes}`
+    } else {
+      body.scope = grantScope || undefined
+    }
+    
+    if (grantExpires.trim()) body.expires_at = new Date(grantExpires).toISOString()
+    
+    grantConsent(body)
+      .then(() => {
+        setGrantScope('all')
+        setGrantToRole('doctor')
+        setGrantExpires('')
+        setSelectedPatient(null)
+        setSelectedFiles([])
+        setPatientFiles([])
+        load()
+        alert(`✅ Access granted for ${selectedFiles.length > 0 ? selectedFiles.length + ' file(s)' : 'all files'}!`)
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Grant failed'))
+      .finally(() => setSubmitting(false))
+  }
+
+  const handleRevoke = (id: number) => {
+    if (!window.confirm('Revoke this consent?')) return
+    setRevokingId(id)
+    revokeConsent(id)
+      .then(load)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Revoke failed'))
+      .finally(() => setRevokingId(null))
+  }
+
+  if (user?.role !== 'patient') {
+    return (
+      <div>
+        <h1 style={{ marginTop: 0 }}>Consent</h1>
+        <p style={{ color: 'var(--muted)' }}>Only patients can manage consent. Your role: {user?.role}.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <h1 style={{ marginTop: 0 }}>Consent management</h1>
+      <p style={{ color: 'var(--muted)', marginBottom: '1.5rem' }}>
+        Grant or revoke access to your medical files for doctors or other users. Search for specific patients and select individual files.
+      </p>
+
+      <section style={{ marginBottom: '2rem', padding: '1.5rem', background: 'var(--surface)', borderRadius: 8, border: '1px solid var(--border)' }}>
+        <h2 style={{ marginTop: 0, fontSize: '1.1rem', marginBottom: '1rem' }}>Grant consent</h2>
+        <form onSubmit={handleGrant}>
+          {error && <p style={{ color: 'var(--danger)', marginBottom: '0.75rem', fontSize: 14, padding: '0.75rem', background: 'rgba(239, 68, 68, 0.1)', borderRadius: 6 }}>{error}</p>}
+          
+          {/* Toggle for patient search */}
+          <div style={{ marginBottom: '1rem' }}>
+            <button
+              type="button"
+              onClick={() => {
+                setShowPatientSearch(!showPatientSearch)
+                if (showPatientSearch) {
+                  setSelectedPatient(null)
+                  setSelectedFiles([])
+                  setPatientFiles([])
+                  setPatients([])
+                }
+              }}
+              style={{ 
+                padding: '0.5rem 1rem', 
+                background: showPatientSearch ? 'var(--accent)' : 'var(--surface)',
+                color: showPatientSearch ? 'white' : 'var(--text)',
+                border: '1px solid var(--border)', 
+                borderRadius: 6, 
+                cursor: 'pointer',
+                fontWeight: 500
+              }}
+            >
+              {showPatientSearch ? '✓ Search by Patient' : '🔍 Search by Patient'}
+            </button>
+            <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: '0.5rem' }}>
+              {showPatientSearch ? 'Select specific patient and files below' : 'Click to search for a specific patient and select files'}
+            </p>
+          </div>
+
+          {/* Patient Search Section */}
+          {showPatientSearch && (
+            <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'var(--bg)', borderRadius: 8, border: '1px solid var(--border)' }}>
+              <h3 style={{ margin: '0 0 1rem', fontSize: '1rem' }}>🔍 Search Patient (DPA-Compliant)</h3>
+              
+              {/* DPA-compliant search form */}
+              <form onSubmit={handlePatientSearch} style={{ marginBottom: '1rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                  <input
+                    type="text"
+                    placeholder="Full Name *"
+                    value={patientSearchForm.full_name}
+                    onChange={(e) => setPatientSearchForm({ ...patientSearchForm, full_name: e.target.value })}
+                    style={inputStyle}
+                    required
+                  />
+                  <input
+                    type="email"
+                    placeholder="Email (optional)"
+                    value={patientSearchForm.email}
+                    onChange={(e) => setPatientSearchForm({ ...patientSearchForm, email: e.target.value })}
+                    style={inputStyle}
+                  />
+                </div>
+                <input
+                  type="tel"
+                  placeholder="Phone (optional)"
+                  value={patientSearchForm.phone}
+                  onChange={(e) => setPatientSearchForm({ ...patientSearchForm, phone: e.target.value })}
+                  style={inputStyle}
+                />
+                <button 
+                  type="submit" 
+                  disabled={searchingPatients} 
+                  style={{ padding: '0.5rem 1rem', background: 'var(--accent)', color: 'white', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  {searchingPatients ? 'Searching...' : 'Search Patient'}
+                </button>
+              </form>
+
+              {/* Quick search */}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+                <input
+                  type="text"
+                  placeholder="Quick search by name or MRN..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
+                />
+                <button 
+                  type="button"
+                  onClick={loadPatients} 
+                  disabled={searchingPatients} 
+                  style={{ padding: '0.5rem 1rem', background: 'var(--accent)', color: 'white', border: 'none', borderRadius: 6 }}
+                >
+                  Search
+                </button>
+              </div>
+
+              {/* Patient Results */}
+              {patients.length > 0 && (
+                <div style={{ marginBottom: '1rem' }}>
+                  <h4 style={{ margin: '0 0 0.5rem', fontSize: '0.9rem' }}>Select Patient:</h4>
+                  <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
+                    {patients.map(patient => (
+                      <div
+                        key={patient.id}
+                        onClick={() => handleSelectPatient(patient)}
+                        style={{
+                          padding: '0.75rem',
+                          background: selectedPatient?.id === patient.id ? 'var(--accent)' : 'transparent',
+                          color: selectedPatient?.id === patient.id ? 'white' : 'var(--text)',
+                          borderBottom: '1px solid var(--border)',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <strong>{patient.full_name}</strong>
+                        {patient.medical_record_number && <span style={{ fontSize: 13, opacity: 0.8, marginLeft: '0.5rem' }}>MRN: {patient.medical_record_number}</span>}
+                        {patient.email && <div style={{ fontSize: 12, opacity: 0.7, marginTop: '0.25rem' }}>{patient.email}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* File Selection */}
+              {selectedPatient && (
+                <div style={{ marginTop: '1rem', padding: '1rem', background: 'var(--surface)', borderRadius: 6, border: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <h4 style={{ margin: 0, fontSize: '0.9rem' }}>📁 Select Files for {selectedPatient.full_name}</h4>
+                    <button
+                      type="button"
+                      onClick={toggleAllFiles}
+                      disabled={patientFiles.length === 0}
+                      style={{ 
+                        padding: '0.25rem 0.75rem', 
+                        background: 'transparent',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                        cursor: patientFiles.length > 0 ? 'pointer' : 'not-allowed',
+                        fontSize: 12
+                      }}
+                    >
+                      {selectedFiles.length === patientFiles.length && patientFiles.length > 0 ? 'Deselect All' : 'Select All'}
+                    </button>
+                  </div>
+
+                  {loadingFiles ? (
+                    <div style={{ padding: '1rem', textAlign: 'center', color: 'var(--muted)' }}>Loading files...</div>
+                  ) : patientFiles.length === 0 ? (
+                    <div style={{ padding: '1rem', textAlign: 'center', color: 'var(--muted)', background: 'rgba(239, 68, 68, 0.1)', borderRadius: 6 }}>
+                      No files found for this patient
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ maxHeight: 250, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)' }}>
+                        {patientFiles.map(file => (
+                          <label
+                            key={file.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.75rem',
+                              padding: '0.75rem',
+                              borderBottom: '1px solid var(--border)',
+                              cursor: 'pointer',
+                              background: selectedFiles.includes(file.id) ? 'rgba(59, 130, 246, 0.1)' : 'transparent'
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedFiles.includes(file.id)}
+                              onChange={() => toggleFileSelection(file.id)}
+                              style={{ width: 16, height: 16, cursor: 'pointer' }}
+                            />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 500, fontSize: 14 }}>{file.filename}</div>
+                              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: '0.25rem' }}>
+                                {(file.size / 1024 / 1024).toFixed(2)} MB • {new Date(file.upload_timestamp).toLocaleDateString()}
+                              </div>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                      {selectedFiles.length > 0 && (
+                        <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: 4, fontSize: 13, color: '#22c55e' }}>
+                          ✓ {selectedFiles.length} file(s) selected
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Traditional scope selection (when not using patient search) */}
+          {!showPatientSearch && (
+            <>
+              <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: 14, color: 'var(--muted)' }}>Scope</label>
+              <select value={grantScope} onChange={(e) => setGrantScope(e.target.value)} style={inputStyle}>
+                <option value="all">All my files</option>
+              </select>
+            </>
+          )}
+
+          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: 14, color: 'var(--muted)' }}>Grant to role</label>
+          <select value={grantToRole} onChange={(e) => setGrantToRole(e.target.value)} style={inputStyle}>
+            <option value="doctor">Doctor</option>
+            <option value="admin">Admin</option>
+          </select>
+          
+          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: 14, color: 'var(--muted)' }}>Expires at (optional)</label>
+          <input type="datetime-local" value={grantExpires} onChange={(e) => setGrantExpires(e.target.value)} style={inputStyle} />
+          
+          <button 
+            type="submit" 
+            disabled={submitting || (showPatientSearch && selectedFiles.length === 0 && selectedPatient !== null)} 
+            style={{ 
+              padding: '0.75rem 1.5rem', 
+              background: 'var(--accent)', 
+              border: 'none', 
+              borderRadius: 6, 
+              color: 'white', 
+              fontWeight: 600,
+              cursor: (submitting || (showPatientSearch && selectedFiles.length === 0 && selectedPatient !== null)) ? 'not-allowed' : 'pointer',
+              opacity: (submitting || (showPatientSearch && selectedFiles.length === 0 && selectedPatient !== null)) ? 0.6 : 1
+            }}
+          >
+            {submitting ? 'Granting...' : selectedFiles.length > 0 ? `Grant access to ${selectedFiles.length} file(s)` : 'Grant consent'}
+          </button>
+        </form>
+      </section>
+
+      <section>
+        <h2 style={{ marginTop: 0, fontSize: '1rem' }}>Your consents</h2>
+        {loading ? (
+          <p style={{ color: 'var(--muted)' }}>Loading...</p>
+        ) : (
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>Scope</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>Granted to</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>Granted at</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>Status</th>
+                  <th style={{ padding: '0.75rem 1rem', fontWeight: 600 }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {list.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: '1.5rem', color: 'var(--muted)' }}>
+                      No consents yet. Grant consent above.
+                    </td>
+                  </tr>
+                ) : (
+                  list.map((c) => (
+                    <tr key={c.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '0.75rem 1rem' }}>{c.scope ?? `file ${c.subject_id}`}</td>
+                      <td style={{ padding: '0.75rem 1rem', color: 'var(--muted)' }}>
+                        {c.granted_to_role ?? `user ${c.granted_to_user_id}`}
+                      </td>
+                      <td style={{ padding: '0.75rem 1rem', fontSize: 14, color: 'var(--muted)' }}>
+                        {new Date(c.granted_at).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '0.75rem 1rem' }}>
+                        {c.revoked_at ? <span style={{ color: 'var(--danger)' }}>Revoked</span> : <span style={{ color: 'var(--success)' }}>Active</span>}
+                      </td>
+                      <td style={{ padding: '0.75rem 1rem' }}>
+                        {!c.revoked_at && (
+                          <button
+                            type="button"
+                            onClick={() => handleRevoke(c.id)}
+                            disabled={revokingId === c.id}
+                            style={{ background: 'none', border: 'none', color: 'var(--danger)', padding: 0, cursor: 'pointer', fontSize: 14 }}
+                          >
+                            {revokingId === c.id ? 'Revoking...' : 'Revoke'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}

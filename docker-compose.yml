@@ -1,0 +1,357 @@
+version: '3.8'
+
+services:
+  # MinIO Node 1
+  minio1:
+    image: minio/minio:latest
+    container_name: minio1
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio1-data:/data
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - dfs-network
+
+  # MinIO Node 2
+  minio2:
+    image: minio/minio:latest
+    container_name: minio2
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio2-data:/data
+    command: server /data --console-address ":9002"
+    ports:
+      - "9010:9000"
+      - "9002:9002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - dfs-network
+
+  # MinIO Node 3
+  minio3:
+    image: minio/minio:latest
+    container_name: minio3
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio3-data:/data
+    command: server /data --console-address ":9003"
+    ports:
+      - "9020:9000"
+      - "9003:9003"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - dfs-network
+
+  # PostgreSQL Primary Database
+  postgres-primary:
+    image: postgres:15-alpine
+    container_name: postgres-primary
+    environment:
+      POSTGRES_USER: dfsuser
+      POSTGRES_PASSWORD: dfspassword
+      POSTGRES_DB: dfs_metadata
+    volumes:
+      - postgres-primary-data:/var/lib/postgresql/data
+      - ./postgres-config/primary-init.sh:/docker-entrypoint-initdb.d/primary-init.sh
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # PostgreSQL Replica 1
+  postgres-replica1:
+    image: postgres:15-alpine
+    container_name: postgres-replica1
+    environment:
+      POSTGRES_USER: dfsuser
+      POSTGRES_PASSWORD: dfspassword
+      POSTGRES_DB: dfs_metadata
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres-replica1-data:/var/lib/postgresql/data
+      - ./postgres-config/replica-init.sh:/docker-entrypoint-initdb.d/replica-init.sh
+    ports:
+      - "5433:5432"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # PostgreSQL Replica 2
+  postgres-replica2:
+    image: postgres:15-alpine
+    container_name: postgres-replica2
+    environment:
+      POSTGRES_USER: dfsuser
+      POSTGRES_PASSWORD: dfspassword
+      POSTGRES_DB: dfs_metadata
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - postgres-replica2-data:/var/lib/postgresql/data
+      - ./postgres-config/replica-init.sh:/docker-entrypoint-initdb.d/replica-init.sh
+    ports:
+      - "5434:5432"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # Legacy postgres alias (points to primary for backward compatibility)
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-dfs
+    environment:
+      POSTGRES_USER: dfsuser
+      POSTGRES_PASSWORD: dfspassword
+      POSTGRES_DB: dfs_metadata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dfs-network
+
+  # Zookeeper (for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - dfs-network
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - dfs-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dfs-network
+
+  # Go Federation gRPC Service
+  federation:
+    build: ./federation
+    container_name: federation-grpc
+    environment:
+      - FEDERATION_GRPC_PORT=50051
+      - MINIO1_ENDPOINT=minio1:9000
+      - MINIO2_ENDPOINT=minio2:9000
+      - MINIO3_ENDPOINT=minio3:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      - MINIO_BUCKET=dfs-files
+    ports:
+      - "50051:50051"
+    depends_on:
+      minio1:
+        condition: service_healthy
+      minio2:
+        condition: service_healthy
+      minio3:
+        condition: service_healthy
+    networks:
+      - dfs-network
+
+  # FastAPI Application
+  fastapi:
+    build: ./app
+    container_name: fastapi-dfs
+    environment:
+      - DATABASE_URL=postgresql://dfsuser:dfspassword@postgres-primary:5432/dfs_metadata
+      - DATABASE_REPLICA1_URL=postgresql://dfsuser:dfspassword@postgres-replica1:5432/dfs_metadata
+      - DATABASE_REPLICA2_URL=postgresql://dfsuser:dfspassword@postgres-replica2:5432/dfs_metadata
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - FEDERATION_GRPC_HOST=federation:50051
+      - MINIO1_ENDPOINT=minio1:9000
+      - MINIO2_ENDPOINT=minio2:9000
+      - MINIO3_ENDPOINT=minio3:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+    ports:
+      - "8000:8000"
+    depends_on:
+      kafka:
+        condition: service_started
+      federation:
+        condition: service_started
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica1:
+        condition: service_healthy
+      postgres-replica2:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio1:
+        condition: service_healthy
+      minio2:
+        condition: service_healthy
+      minio3:
+        condition: service_healthy
+    volumes:
+      - ./app:/app
+    networks:
+      - dfs-network
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-dfs
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # Grafana Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-dfs
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml
+      - ./grafana/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # Redis Exporter for Prometheus
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: redis-exporter
+    environment:
+      - REDIS_ADDR=redis:6379
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # PostgreSQL Exporter for Prometheus
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: postgres-exporter
+    environment:
+      - DATA_SOURCE_NAME=postgresql://dfsuser:dfspassword@postgres-primary:5432/dfs_metadata?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+networks:
+  dfs-network:
+    driver: bridge
+
+volumes:
+  minio1-data:
+  minio2-data:
+  minio3-data:
+  postgres-primary-data:
+  postgres-replica1-data:
+  postgres-replica2-data:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

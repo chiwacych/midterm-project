@@ -1,0 +1,93 @@
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 240px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  padding: 1.25rem 1rem;
+  font-weight: 700;
+  font-size: 1.125rem;
+}
+
+.brand a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.brand a:hover {
+  text-decoration: none;
+  color: var(--accent);
+}
+
+.nav {
+  flex: 1;
+  padding: 0.5rem 0;
+}
+
+.nav a {
+  display: block;
+  padding: 0.5rem 1rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.nav a:hover,
+.nav a:global(.active) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.user {
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.role {
+  display: block;
+  text-transform: capitalize;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+}
+
+.email {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.logout {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+}
+
+.logout:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+
+.main {
+  flex: 1;
+  padding: 1.5rem 2rem;
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}

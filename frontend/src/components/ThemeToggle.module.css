@@ -1,0 +1,29 @@
+.themeToggle {
+  display: flex;
+  gap: 0.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.25rem;
+}
+
+.themeButton {
+  background: transparent;
+  border: none;
+  padding: 0.5rem 0.75rem;
+  font-size: 1.125rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  opacity: 0.6;
+}
+
+.themeButton:hover {
+  opacity: 1;
+  background: var(--hover);
+}
+
+.themeButton.active {
+  opacity: 1;
+  background: var(--accent);
+}
