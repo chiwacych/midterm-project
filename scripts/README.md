@@ -1,335 +1,203 @@
 # Deployment Scripts
 
-Streamlined scripts for deploying hospitals to multipass VMs.
+Scripts for deploying, managing, and testing the federated hospital network.
+
+---
 
 ## Quick Start
 
 ```powershell
-# Deploy Hospital A and start services
+# Deploy a new hospital and start services
 .\scripts\deploy.ps1 -Hospital hospital-a -Start
 
-# Deploy Hospital B with clean slate
-.\scripts\deploy.ps1 -Hospital hospital-b -Clean -Start
+# Deploy with clean slate
+.\scripts\deploy.ps1 -Hospital hospital-a -Clean -Start
 
-# Deploy both hospitals
-.\scripts\deploy.ps1 -Hospital both -Start
+# Deploy all running hospital VMs at once
+.\scripts\deploy.ps1 -Hospital all -Start
 ```
 
-## Main Scripts
+---
 
-### 🚀 deploy.ps1 (PRIMARY - USE THIS)
-**Unified deployment script for all hospitals.**
+## Deployment
 
-Single entry point for deploying any hospital independently. Replaces the old separate scripts.
+### `deploy.ps1` — Primary deployment entry point
+Deploys any hospital to a multipass VM. Auto-discovers peers from running VMs.
 
-**Usage:**
 ```powershell
-.\scripts\deploy.ps1 [-Hospital <name>] [-Clean] [-Start] [-SkipBuild]
+.\scripts\deploy.ps1 [-Hospital <id>] [-Peers <list>] [-Clean] [-Start] [-SkipBuild] [-ShowHelp]
 ```
 
-**Parameters:**
-- `-Hospital` - Which hospital: `hospital-a`, `hospital-b`, or `both` (default: hospital-a)
-- `-Clean` - Clean VM before deployment (removes all data)
-- `-Start` - Start services automatically after deployment
-- `-SkipBuild` - Skip frontend build (faster redeployment)
+| Parameter | Description |
+|-----------|-------------|
+| `-Hospital` | Hospital ID (e.g. `hospital-a`, `hospital-c`) or `all`. Default: `hospital-a` |
+| `-Peers` | Comma-separated peer IDs. Auto-detected from running VMs if omitted |
+| `-Clean` | Wipe the VM before deploying |
+| `-Start` | Start services immediately after deployment |
+| `-SkipBuild` | Skip frontend npm build (faster re-deploys) |
 
 **Examples:**
 ```powershell
-# Deploy Hospital A (minimal)
-.\scripts\deploy.ps1
-
-# Deploy and start
+# First hospital (standalone)
 .\scripts\deploy.ps1 -Hospital hospital-a -Start
 
-# Fresh deployment with cleanup
-.\scripts\deploy.ps1 -Hospital hospital-b -Clean -Start
+# Additional hospital — auto-finds peers
+.\scripts\deploy.ps1 -Hospital hospital-b -Start
 
-# Deploy both hospitals
-.\scripts\deploy.ps1 -Hospital both -Start
+# New hospital-c with explicit peer
+.\scripts\deploy.ps1 -Hospital hospital-c -Peers hospital-a -Clean -Start
 
-# Quick redeploy without frontend rebuild
-.\scripts\deploy.ps1 -SkipBuild -Start
+# Redeploy backend only (no frontend rebuild)
+.\scripts\deploy.ps1 -Hospital hospital-a -SkipBuild -Start
 ```
 
-### ⚙️ deploy-to-vm.ps1 (INTERNAL)
-**Core deployment engine called by deploy.ps1.**
+---
 
-Handles actual file transfer, docker-compose generation, and VM configuration. Not meant to be called directly unless you need custom deployment parameters.
-
-## Deprecated Scripts (Can be removed)
-
-These scripts are redundant with the new unified deploy.ps1:
-
-- ❌ `deploy-hospitals.ps1` - Replaced by `deploy.ps1 -Hospital both`
-- ❌ `deploy-hospital-a.ps1` - Replaced by `deploy.ps1 -Hospital hospital-a`
-- ❌ `deploy-hospital-b.ps1` - Replaced by `deploy.ps1 -Hospital hospital-b`
-
-## Utility Scripts
-
-### 🔐 generate-mtls-certs.ps1
-Generate mTLS certificates for hospitals (CA + hospital certs).
+### `deploy-to-vm.ps1` — Core deployment engine
+Called by `deploy.ps1`. Handles file transfer, docker-compose generation, and startup script creation. Can be called directly for advanced use.
 
 ```powershell
+.\scripts\deploy-to-vm.ps1 -VM hospital-c -HospitalID hospital-c -HospitalName "Hospital C" -Peers "hospital-a"
+```
+
+---
+
+## Certificates
+
+### `generate-mtls-certs.ps1` — Generate mTLS certificates (Windows)
+Creates CA + per-hospital TLS certificates used by the federation gRPC service.
+
+```powershell
+# Generate for default hospitals a and b
 .\scripts\generate-mtls-certs.ps1
+
+# Generate for additional hospital
+.\scripts\generate-mtls-certs.ps1 -Hospitals @("hospital-c")
 ```
 
-### 🏥 check-hospitals.ps1
-Check status of all hospital VMs and services.
+### `generate-mtls-certs.sh` — Same, for Linux/macOS
+```bash
+bash scripts/generate-mtls-certs.sh
+```
+
+> Certificates are written to `certs/` (gitignored — never committed).
+
+---
+
+## Health & Monitoring
+
+### `check-hospitals.ps1` — Health check all running hospital VMs
+Dynamically discovers all `hospital-*` VMs, checks API/MinIO/Prometheus endpoints, Docker container status, and libp2p peer counts.
 
 ```powershell
-.\scripts\check-hospitals.ps1
+.\scripts\check-hospitals.ps1            # check all
+.\scripts\check-hospitals.ps1 -Hospital hospital-a  # check one
 ```
 
-### 🔍 access-hospitals.ps1
-Show access URLs and quick commands for hospitals.
+### `access-hospitals.ps1` — Show access URLs / open in browser
+Discovers running VMs, prints URLs and credentials, optionally opens browser.
 
 ```powershell
-.\scripts\access-hospitals.ps1
+.\scripts\access-hospitals.ps1           # all hospitals
+.\scripts\access-hospitals.ps1 -Open     # auto-open Web UI
+.\scripts\access-hospitals.ps1 -Hospital hospital-a
 ```
 
-### 🧪 test-federation.ps1
-Test federation connectivity between hospitals.
+### `check_replication.py` — MinIO replication checker
+Verifies file replication across the 3-node MinIO cluster.
+
+```bash
+python scripts/check_replication.py
+```
+
+---
+
+## Testing
+
+### `test-federation.ps1` — Cross-hospital federation test (Windows)
+Simulates a full patient data sharing workflow between two hospitals: login → create patient → upload image → grant consent → federated access from second hospital.
 
 ```powershell
 .\scripts\test-federation.ps1
 ```
 
-## Workflow Examples
-
-### First-Time Setup
-
-```powershell
-# 1. Generate certificates (if not already done)
-.\scripts\generate-mtls-certs.ps1
-
-# 2. Deploy both hospitals
-.\scripts\deploy.ps1 -Hospital both -Start
-
-# 3. Wait for services to be ready (check status)
-.\scripts\check-hospitals.ps1
-
-# 4. Register hospitals in federation registry (via UI or API)
-# Use UI: http://<hospital-ip> → Federation Network → Registry tab → Self-Register
-# Or API: curl -X POST http://<hospital-ip>/api/federation/registry/self-register
-```
-
-### Add New Hospital (Non-Disruptive)
-
-```powershell
-# Deploy only Hospital B without affecting Hospital A
-.\scripts\deploy.ps1 -Hospital hospital-b -Start
-
-# Hospital A continues running unaffected
-```
-
-### Update Single Hospital
-
-```powershell
-# Make code changes...
-
-# Redeploy just Hospital A
-.\scripts\deploy.ps1 -Hospital hospital-a -Start
-
-# Hospital B remains untouched
-```
-
-### Quick Code Update (Skip Frontend Build)
-
-```powershell
-# If only backend changes, skip frontend build
-.\scripts\deploy.ps1 -Hospital hospital-a -SkipBuild -Start
-```
-
-### Clean Deployment
-
-```powershell
-# Remove all data and start fresh
-.\scripts\deploy.ps1 -Hospital hospital-a -Clean -Start
-```
-
-## Post-Deployment
-
-After deployment, access your hospitals:
-
-### Web UI
-- Hospital A: `http://<hospital-a-ip>`
-- Hospital B: `http://<hospital-b-ip>`
-
-### API Documentation
-- Hospital A: `http://<hospital-a-ip>/docs`
-- Hospital B: `http://<hospital-b-ip>/docs`
-
-### Federation Registry
-Self-register hospitals:
+### `test-federation.sh` — Same, for Linux/macOS
 ```bash
-# Hospital A
-curl -X POST http://<hospital-a-ip>/api/federation/registry/self-register
-
-# Hospital B
-curl -X POST http://<hospital-b-ip>/api/federation/registry/self-register
+bash scripts/test-federation.sh
 ```
 
-Or use the UI: **Federation Network → Registry tab → Self-Register button**
+### `registry_cli.py` — Federation registry CLI
+Query and manage the federation registry from the command line.
 
-### Manual Peer Discovery
-Trigger immediate peer discovery (instead of waiting 5 minutes):
 ```bash
-curl -X POST http://<hospital-ip>/api/federation/registry/discover-now
+python scripts/registry_cli.py list
+python scripts/registry_cli.py register --url http://<ip>
+python scripts/registry_cli.py discover hospital-a
+python scripts/registry_cli.py info hospital-b
 ```
 
-Or use the UI: **Federation Network page → "Discover Peers Now" button**
+---
 
 ## VM Management
 
-### Check Services
+### `setup.ps1` — First-time Windows setup
+Checks Docker Desktop, starts services locally, shows endpoint summary.
+
+### `fix-vm-performance.ps1` — Increase VM resources
+Stops VMs, increases CPUs to 4 and RAM to 4 GB, restarts.
+
 ```powershell
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml ps
+.\scripts\fix-vm-performance.ps1
 ```
 
-### View Logs
+### `increase-vm-disk.ps1` — Increase VM disk size to 20 GB
 ```powershell
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml logs -f
+.\scripts\increase-vm-disk.ps1
 ```
 
-### Shell Access
+### `update-hosts-admin.ps1` — Update Windows hosts file (run as Admin)
+Adds `hospital-a.local` / `hospital-b.local` entries to `C:\Windows\System32\drivers\etc\hosts`.
+
+---
+
+## Kafka / Infrastructure
+
+### `create-kafka-topics.sh` — Create required Kafka topics
+```bash
+bash scripts/create-kafka-topics.sh
+```
+
+### `failover.sh` — Simulate node failover
+Tests fault tolerance by stopping a MinIO node and verifying continued access.
+
+```bash
+bash scripts/failover.sh
+```
+
+---
+
+## Default Credentials (per hospital)
+
+| Role | Email | Password |
+|------|-------|----------|
+| Admin | `admin@<hospital-id>.local` | `admin123` |
+| Doctor | `doctor@<hospital-id>.local` | `doctor123` |
+
+Created automatically by `POST /api/auth/seed` on first `start.sh` run.
+
+---
+
+## Adding a New Hospital
+
 ```powershell
-multipass shell hospital-a
-```
+# 1. Create VM
+multipass launch --name hospital-c --cpus 2 --memory 4G --disk 30G 22.04
 
-### Restart Services
-```powershell
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml restart
-```
+# 2. Generate certificate
+.\scripts\generate-mtls-certs.ps1 -Hospitals @("hospital-c")
 
-### Stop Services
-```powershell
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml down
-```
-
-## Architecture
-
-### Deployment Flow
-
-```
-deploy.ps1
-    ├─> Validates VM exists
-    ├─> Generates certificates (if needed)
-    ├─> Builds frontend (unless -SkipBuild)
-    └─> Calls deploy-to-vm.ps1
-            ├─> Cleans VM (if -Clean)
-            ├─> Creates directory structure
-            ├─> Transfers files
-            │   ├─> FastAPI app
-            │   ├─> Federation service (Go)
-            │   ├─> Frontend build
-            │   ├─> Certificates
-            │   ├─> PostgreSQL scripts
-            │   ├─> Federation registry
-            │   └─> Peer discovery
-            ├─> Generates docker-compose.yml
-            ├─> Creates startup script
-            └─> Optionally starts services
-```
-
-### Hospital Independence
-
-Each hospital has:
-- ✅ Separate VM (isolated compute)
-- ✅ Separate data volumes (isolated storage)
-- ✅ Separate docker-compose (isolated services)
-- ✅ Separate certificates (isolated identity)
-- ✅ Can be deployed/updated independently
-
-### Federation Registry
-
-- **Storage**: `/home/ubuntu/medimage/data/federation-registry.json`
-- **Auto-discovery**: Runs every 5 minutes
-- **Manual discovery**: UI button or API endpoint
-- **Persistence**: Survives container restarts
-
-## Troubleshooting
-
-### VM Not Found
-```powershell
-# Create VM
-multipass launch --name hospital-a --cpus 4 --memory 8G --disk 40G
-```
-
-### Certificates Missing
-```powershell
-# Generate certificates
-.\scripts\generate-mtls-certs.ps1
-```
-
-### Frontend Build Issues
-```powershell
-# Rebuild frontend manually
-cd frontend
-npm install
-npm run build
-```
-
-### Services Won't Start
-```powershell
-# Check logs
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml logs
-
-# Try clean deployment
-.\scripts\deploy.ps1 -Hospital hospital-a -Clean -Start
-```
-
-### Can't Access UI
-```powershell
-# Get VM IP
-multipass info hospital-a
-
-# Check if services are running
-multipass exec hospital-a -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml ps
-```
-
-## Migration from Old Scripts
-
-If you were using the old scripts:
-
-**Old:**
-```powershell
-.\scripts\deploy-hospitals.ps1 -Both -Start
-.\scripts\deploy-hospital-a.ps1
-.\scripts\deploy-hospital-b.ps1
-```
-
-**New:**
-```powershell
-.\scripts\deploy.ps1 -Hospital both -Start
-.\scripts\deploy.ps1 -Hospital hospital-a
-.\scripts\deploy.ps1 -Hospital hospital-b
-```
-
-You can safely delete the old scripts:
-- `deploy-hospitals.ps1`
-- `deploy-hospital-a.ps1`
-- `deploy-hospital-b.ps1`
-
-## Contributing
-
-When adding new hospitals:
-
-1. Add configuration to `$HospitalConfig` in `deploy.ps1`:
-```powershell
-"hospital-c" = @{
-    ID = "hospital-c"
-    Name = "Hospital C"
-    VM = "hospital-c"
-    Peer = "hospital-a"  # or appropriate peer
-}
-```
-
-2. Generate certificates:
-```powershell
-.\scripts\generate-mtls-certs.ps1
-```
-
-3. Deploy:
-```powershell
+# 3. Deploy (auto-discovers peers from running VMs)
 .\scripts\deploy.ps1 -Hospital hospital-c -Start
+# → bootstraps to first peer, discovers rest via libp2p peer exchange
+# → seeds admin@hospital-c.local / admin123 and doctor@hospital-c.local / doctor123
 ```

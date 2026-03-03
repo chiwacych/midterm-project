@@ -1,11 +1,34 @@
 # Hospital Systems Health Check Script
-# Verifies both hospital systems are operational
+# Dynamically discovers all running hospital-* VMs and checks health
 
-$HOSPITAL_A_IP = "172.29.134.2"
-$HOSPITAL_B_IP = "172.29.138.240"
+param([string]$Hospital = "all")
 
 Write-Host "=== Hospital Systems Health Check ===" -ForegroundColor Green
 Write-Host ""
+
+# Discover running hospital VMs dynamically
+$discoveredHospitals = @{}
+try {
+    $vmList = multipass list --format csv 2>$null | Select-Object -Skip 1
+    foreach ($line in $vmList) {
+        $parts = $line -split ','
+        $vmName  = $parts[0].Trim()
+        $vmState = $parts[1].Trim()
+        if ($vmName -match '^hospital-' -and $vmState -eq 'Running') {
+            if ($Hospital -eq 'all' -or $Hospital -eq $vmName) {
+                $info = multipass info $vmName 2>$null | Out-String
+                if ($info -match 'IPv4:\s+([\d\.]+)') {
+                    $discoveredHospitals[$vmName] = $matches[1]
+                }
+            }
+        }
+    }
+} catch {}
+
+if ($discoveredHospitals.Count -eq 0) {
+    Write-Host "❌ No running hospital-* VMs found" -ForegroundColor Red
+    exit 1
+}
 
 function Check-Service {
     param($Name, $Url)
@@ -20,32 +43,34 @@ function Check-Service {
 }
 
 function Check-Hospital {
-    param($Name, $IP)
-    
-    Write-Host "$Name ($IP)" -ForegroundColor Cyan
+    param([string]$VMName, [string]$IP)
+
+    $suffix = ($VMName -replace '^hospital-', '').ToUpper()
+    $displayName = "Hospital $suffix"
+
+    Write-Host "$displayName  ($VMName / $IP)" -ForegroundColor Cyan
     Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
-    
+
     $services = @{
-        "FastAPI" = "http://${IP}:8000/docs"
+        "Web UI / API"  = "http://${IP}/api/health"
         "MinIO Console" = "http://${IP}:9001"
-        "Grafana" = "http://${IP}:3001"
+        "Prometheus"    = "http://${IP}:9090"
     }
-    
+
     $allHealthy = $true
     foreach ($service in $services.GetEnumerator()) {
         $result = Check-Service -Name $service.Key -Url $service.Value
         if (-not $result) { $allHealthy = $false }
     }
-    
+
     # Check Docker containers
     Write-Host ""
     Write-Host "  Docker Containers:" -ForegroundColor White
-    $vmName = if ($Name -eq "Hospital A") { "hospital-a" } else { "hospital-b" }
     try {
-        $containers = multipass exec $vmName -- docker ps --format "table {{.Names}}\t{{.Status}}" 2>$null
+        $containers = multipass exec $VMName -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}" 2>$null
         if ($containers) {
-            $containers -split "`n" | Select-Object -Skip 1 | ForEach-Object {
-                if ($_ -match "Up") {
+            $containers -split "`n" | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
+                if ($_ -match "Up|running") {
                     Write-Host "    ✓ $_" -ForegroundColor Green
                 } else {
                     Write-Host "    ⚠ $_" -ForegroundColor Yellow
@@ -57,75 +82,61 @@ function Check-Hospital {
         Write-Host "    ✗ Could not check containers" -ForegroundColor Red
         $allHealthy = $false
     }
-    
+
     Write-Host ""
     return $allHealthy
 }
 
-# Check Hospital A
-$healthyA = Check-Hospital -Name "Hospital A" -IP $HOSPITAL_A_IP
-
-# Check Hospital B
-$healthyB = Check-Hospital -Name "Hospital B" -IP $HOSPITAL_B_IP
-
-# Federation connectivity check
-Write-Host "Federation Connectivity" -ForegroundColor Cyan
-Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
-
-try {
-    multipass exec hospital-a -- bash -c "nc -zv $HOSPITAL_B_IP 50051 2>&1" | Out-Null
-    Write-Host "  ✓ Hospital A → Hospital B (gRPC:50051)" -ForegroundColor Green
-    $fedA = $true
-} catch {
-    Write-Host "  ✗ Hospital A → Hospital B (gRPC:50051) - Not reachable" -ForegroundColor Red
-    $fedA = $false
+# Check each discovered hospital dynamically
+$healthResults = @{}
+foreach ($entry in $discoveredHospitals.GetEnumerator()) {
+    $healthResults[$entry.Key] = Check-Hospital -VMName $entry.Key -IP $entry.Value
 }
 
-try {
-    multipass exec hospital-b -- bash -c "nc -zv $HOSPITAL_A_IP 50051 2>&1" | Out-Null
-    Write-Host "  ✓ Hospital B → Hospital A (gRPC:50051)" -ForegroundColor Green
-    $fedB = $true
-} catch {
-    Write-Host "  ✗ Hospital B → Hospital A (gRPC:50051) - Not reachable" -ForegroundColor Red
-    $fedB = $false
+# Federation connectivity check (libp2p peer mesh)
+$vmList = @($discoveredHospitals.Keys)
+if ($vmList.Count -ge 2) {
+    Write-Host "Federation / libp2p Connectivity" -ForegroundColor Cyan
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
+    foreach ($vm in $vmList) {
+        $ip = $discoveredHospitals[$vm]
+        try {
+            $peers = multipass exec $vm -- bash -c "curl -sf http://localhost:8000/api/federation/peers 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"peers_count\",\"?\"))'" 2>$null
+            if ($peers -match '^\d+') {
+                Write-Host "  ✓ $vm  peers_count=$peers" -ForegroundColor Green
+            } else {
+                Write-Host "  ⚠ $vm  could not query peers" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  ✗ $vm  unreachable" -ForegroundColor Red
+        }
+    }
+    Write-Host ""
 }
-
-Write-Host ""
 
 # Summary
+$allOk = ($healthResults.Values | Where-Object { -not $_ }).Count -eq 0
 Write-Host "=== System Status Summary ===" -ForegroundColor Green
 Write-Host ""
 
-if ($healthyA -and $healthyB -and $fedA -and $fedB) {
-    Write-Host "✓ All systems operational" -ForegroundColor Green
-    Write-Host "✓ Federation connectivity established" -ForegroundColor Green
+if ($allOk) {
+    Write-Host "✓ All $($discoveredHospitals.Count) hospital(s) operational" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Ready for cross-hospital file exchange testing!" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Run: .\scripts\test-federation.ps1" -ForegroundColor Yellow
+    Write-Host "Run federation test: .\scripts\test-federation.ps1" -ForegroundColor Cyan
 } else {
     Write-Host "⚠ Some issues detected" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Troubleshooting:" -ForegroundColor Cyan
-    if (-not $healthyA) {
-        Write-Host "  - Check Hospital A: multipass exec hospital-a -- docker compose ps" -ForegroundColor White
-    }
-    if (-not $healthyB) {
-        Write-Host "  - Check Hospital B: multipass exec hospital-b -- docker compose ps" -ForegroundColor White
-    }
-    if (-not $fedA -or -not $fedB) {
-        Write-Host "  - Check federation logs: multipass exec hospital-a -- docker compose logs federation" -ForegroundColor White
+    foreach ($entry in $healthResults.GetEnumerator()) {
+        if (-not $entry.Value) {
+            Write-Host "  - Check $($entry.Key): multipass exec $($entry.Key) -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml ps" -ForegroundColor White
+        }
     }
 }
 
 Write-Host ""
 Write-Host "Service URLs:" -ForegroundColor Cyan
-Write-Host "  Hospital A API: http://$HOSPITAL_A_IP:8000" -ForegroundColor White
-Write-Host "  Hospital A Docs: http://$HOSPITAL_A_IP:8000/docs" -ForegroundColor White
-Write-Host "  Hospital A MinIO: http://$HOSPITAL_A_IP:9001 (minioadmin/minioadmin123)" -ForegroundColor White
-Write-Host "  Hospital A Grafana: http://$HOSPITAL_A_IP:3001 (admin/admin)" -ForegroundColor White
-Write-Host ""
-Write-Host "  Hospital B API: http://$HOSPITAL_B_IP:8000" -ForegroundColor White
-Write-Host "  Hospital B Docs: http://$HOSPITAL_B_IP:8000/docs" -ForegroundColor White
-Write-Host "  Hospital B MinIO: http://$HOSPITAL_B_IP:9001 (minioadmin/minioadmin123)" -ForegroundColor White
-Write-Host "  Hospital B Grafana: http://$HOSPITAL_B_IP:3001 (admin/admin)" -ForegroundColor White
+foreach ($entry in $discoveredHospitals.GetEnumerator()) {
+    $n = $entry.Key; $ip = $entry.Value
+    Write-Host "  $n :  http://$ip  |  MinIO: http://${ip}:9001  |  Prometheus: http://${ip}:9090" -ForegroundColor White
+}
