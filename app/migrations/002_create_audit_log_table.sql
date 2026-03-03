@@ -1,8 +1,8 @@
--- Migration 002: Create audit_log table
+-- Migration 002: Create audit_logs table
 -- Date: 2026-01-31
--- Description: Creates the audit_log table for tracking system events
+-- Description: Creates the audit_logs table for tracking system events
 
-CREATE TABLE IF NOT EXISTS audit_log (
+CREATE TABLE IF NOT EXISTS audit_logs (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     event_type VARCHAR(100) NOT NULL,
@@ -19,11 +19,11 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 -- Create indexes for common query patterns
-CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
-CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
-CREATE INDEX IF NOT EXISTS idx_audit_log_status ON audit_log(status);
-CREATE INDEX IF NOT EXISTS idx_audit_log_severity ON audit_log(severity);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_status ON audit_logs(status);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_severity ON audit_logs(severity);
 
 -- Composite index for date range queries with filters
-CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp_type ON audit_log(timestamp, event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp_type ON audit_logs(timestamp, event_type);

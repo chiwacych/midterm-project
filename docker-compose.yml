@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # MinIO Node 1
   minio1:
@@ -78,7 +76,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      test: ["CMD-SHELL", "pg_isready -U dfsuser -d dfs_metadata"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -104,7 +102,7 @@ services:
       postgres-primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      test: ["CMD-SHELL", "pg_isready -U dfsuser -d dfs_metadata"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -130,7 +128,7 @@ services:
       postgres-primary:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      test: ["CMD-SHELL", "pg_isready -U dfsuser -d dfs_metadata"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -151,7 +149,7 @@ services:
     ports:
       - "5435:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dfsuser"]
+      test: ["CMD-SHELL", "pg_isready -U dfsuser -d dfs_metadata"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -160,7 +158,7 @@ services:
 
   # Zookeeper (for Kafka)
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
+    image: confluentinc/cp-zookeeper:7.0.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
@@ -172,7 +170,7 @@ services:
 
   # Kafka
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
+    image: confluentinc/cp-kafka:7.0.0
     container_name: kafka
     depends_on:
       - zookeeper
@@ -218,8 +216,21 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin123
       - MINIO_BUCKET=dfs-files
+      # libp2p configuration
+      - HOSPITAL_ID=${HOSPITAL_ID:-hospital-a}
+      - HOSPITAL_NAME=${HOSPITAL_NAME:-Hospital A}
+      - LIBP2P_PORT=4001
+      - LIBP2P_EXTERNAL_IP=${HOST_IP:-}
+      - FASTAPI_HOST=fastapi
+      - API_PORT=8000
+      - DATA_DIR=/data
+      # mTLS Configuration (optional - comment out for insecure mode)
+      - TLS_CERT_FILE=/certs/hospital-a-cert.pem
+      - TLS_KEY_FILE=/certs/hospital-a-key.pem
+      - TLS_CA_FILE=/certs/ca-cert.pem
     ports:
       - "50051:50051"
+      - "4001:4001"
     depends_on:
       minio1:
         condition: service_healthy
@@ -227,8 +238,18 @@ services:
         condition: service_healthy
       minio3:
         condition: service_healthy
+    volumes:
+      - ./certs:/certs:ro
+      - federation-data:/data
     networks:
       - dfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 50051 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # FastAPI Application
   fastapi:
@@ -246,6 +267,13 @@ services:
       - MINIO3_ENDPOINT=minio3:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin123
+      # mTLS Configuration (matching federation service)
+      - TLS_CERT_FILE=/certs/hospital-a-cert.pem
+      - TLS_KEY_FILE=/certs/hospital-a-key.pem
+      - TLS_CA_FILE=/certs/ca-cert.pem
+      - HOSPITAL_ID=${HOSPITAL_ID:-hospital-a}
+      - HOSPITAL_NAME=${HOSPITAL_NAME:-Hospital A}
+      - API_PORT=8000
     ports:
       - "8000:8000"
     depends_on:
@@ -269,8 +297,12 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app
+      - ./frontend/dist:/app/frontend/dist:ro
+      - ./certs:/certs:ro
+      - fastapi-data:/app/data
     networks:
       - dfs-network
+    restart: unless-stopped
 
   # Prometheus Monitoring
   prometheus:
@@ -355,3 +387,5 @@ volumes:
   redis-data:
   prometheus-data:
   grafana-data:
+  federation-data:
+  fastapi-data:

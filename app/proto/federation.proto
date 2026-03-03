@@ -4,12 +4,31 @@ package federation.v1;
 
 option go_package = "medimage/federation/pkg/federationv1;federationv1";
 
+// FederationService provides file storage and retrieval for the medical image federation.
 service FederationService {
+  // Health check for MinIO and service.
   rpc Health(HealthRequest) returns (HealthResponse);
+  // Check if a file with given SHA256 already exists (duplicate detection).
   rpc CheckDuplicate(CheckDuplicateRequest) returns (CheckDuplicateResponse);
+  // Upload a file (streaming). Rejects if duplicate SHA256 when reject_duplicate is true.
   rpc UploadFile(stream UploadChunk) returns (UploadResponse);
+  // Download a file by object key (streaming).
   rpc DownloadFile(DownloadRequest) returns (stream DownloadChunk);
+  // List objects in a bucket (optional prefix).
   rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+
+  // ── libp2p peer-discovery & cross-hospital transfer ──
+
+  // List peers discovered via libp2p mDNS / explicit bootstrap.
+  rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+  // Transfer a file to a remote hospital via libp2p stream (replaces HTTP POST).
+  rpc TransferFile(TransferFileRequest) returns (TransferFileResponse);
+  // Check health of a specific remote peer via libp2p stream.
+  rpc PeerHealth(PeerHealthRequest) returns (PeerHealthResponse);
+  // Tell the Go sidecar about a remote peer to connect to.
+  rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
+  // Get this node's libp2p peer ID and listen addresses.
+  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse);
 }
 
 message HealthRequest {}
@@ -23,21 +42,21 @@ message HealthResponse {
 message CheckDuplicateRequest {
   string sha256_hex = 1;
   string bucket = 2;
-  string prefix = 3;
+  string prefix = 3;  // optional key prefix to scope search
 }
 
 message CheckDuplicateResponse {
   bool exists = 1;
-  string object_key = 2;
+  string object_key = 2;  // set if exists
 }
 
 message UploadChunk {
   string bucket = 1;
   string object_key = 2;
   string content_type = 3;
-  bool reject_duplicate = 4;
-  bytes data = 5;
-  string sha256_hex = 6;
+  bool reject_duplicate = 4;  // if true, reject when SHA256 already exists
+  bytes data = 5;             // chunk data; last chunk can be empty to signal done
+  string sha256_hex = 6;      // full file SHA256 (send with first or last chunk)
 }
 
 message UploadResponse {
@@ -70,4 +89,88 @@ message ObjectInfo {
 
 message ListObjectsResponse {
   repeated ObjectInfo objects = 1;
+}
+
+// ── libp2p peer-discovery messages ──
+
+message ListPeersRequest {}
+
+message DiscoveredPeer {
+  string peer_id = 1;         // libp2p peer ID (e.g. 12D3Koo...)
+  string hospital_id = 2;     // human-readable id (e.g. "hospital-a")
+  string hospital_name = 3;
+  repeated string addresses = 4; // multiaddrs
+  bool reachable = 5;
+  int64 latency_ms = 6;
+}
+
+message ListPeersResponse {
+  repeated DiscoveredPeer peers = 1;
+}
+
+// ── Cross-hospital file transfer via libp2p ──
+
+message TransferFileRequest {
+  string target_peer_id = 1;      // libp2p peer ID of target hospital
+  string target_hospital_id = 2;  // human-readable hospital ID (fallback lookup)
+  string bucket = 3;
+  string object_key = 4;
+  string original_filename = 5;
+  string content_type = 6;
+  string checksum = 7;            // SHA-256
+  // Patient metadata
+  string patient_name = 8;
+  string patient_mrn = 9;
+  string patient_dob = 10;
+  string reason = 11;
+  // Source
+  string source_hospital_id = 12;
+  string source_hospital_name = 13;
+  string transfer_id = 14;       // caller-generated UUID
+}
+
+message TransferFileResponse {
+  bool success = 1;
+  string message = 2;
+  string transfer_id = 3;
+  string receiving_hospital_name = 4;
+}
+
+// ── Peer health check ──
+
+message PeerHealthRequest {
+  string target_peer_id = 1;
+  string target_hospital_id = 2;
+}
+
+message PeerHealthResponse {
+  bool reachable = 1;
+  int64 latency_ms = 2;
+  string hospital_id = 3;
+  string hospital_name = 4;
+}
+
+// ── Explicit peer bootstrap ──
+
+message AddPeerRequest {
+  repeated string multiaddrs = 1; // e.g. ["/ip4/172.29.0.10/tcp/4001/p2p/12D3K..."]
+  string hospital_id = 2;        // optional hint
+  string hospital_name = 3;      // optional hint
+}
+
+message AddPeerResponse {
+  bool success = 1;
+  string peer_id = 2;
+  string message = 3;
+}
+
+// ── Local node info ──
+
+message GetNodeInfoRequest {}
+
+message GetNodeInfoResponse {
+  string peer_id = 1;              // this node's libp2p peer ID
+  string hospital_id = 2;
+  string hospital_name = 3;
+  repeated string listen_addrs = 4; // full multiaddrs including /p2p/<peerID>
 }

@@ -56,6 +56,9 @@ export function Login() {
       <p style={{ marginTop: '1rem', fontSize: 14, color: 'var(--muted)' }}>
         No account? <Link to="/signup">Sign up</Link>
       </p>
+      <p style={{ marginTop: '0.5rem', fontSize: 14, color: 'var(--muted)' }}>
+        Have an invitation token? <Link to="/setup-password">Set up password</Link>
+      </p>
     </div>
   )
 }

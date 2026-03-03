@@ -20,17 +20,15 @@ export function Layout() {
         </div>
         <nav className={styles.nav}>
           <Link to="/">Dashboard</Link>
-          <Link to="/files">Files</Link>
-          <Link to="/search">Advanced Search</Link>
-          <Link to="/upload">Upload Queue</Link>
-          <Link to="/dicom-viewer">DICOM Viewer</Link>
-          <Link to="/share">Share Access</Link>
-          {user?.role === 'patient' && <Link to="/consent">Consent</Link>}
-          <Link to="/consent-management">Consent Management</Link>
-          <Link to="/federation">Federation Network</Link>
-          <Link to="/audit">Audit Logs</Link>
-          <Link to="/profile">Profile</Link>
-          {user?.role === 'admin' && <Link to="/admin">Admin</Link>}
+          {user?.role !== 'patient' && (
+            <Link to="/files">Files</Link>
+          )}
+          {(user?.role === 'doctor' || user?.role === 'admin') && <Link to="/share">Consent Requests</Link>}
+          {user?.role === 'patient' && <Link to="/consent">My Consent</Link>}
+          {user?.role !== 'patient' && (
+            <Link to="/federation">Federation Network</Link>
+          )}
+          <Link to="/settings">Settings</Link>
         </nav>
         <div className={styles.user}>
           <span className={styles.role}>{user?.role}</span>

@@ -87,12 +87,14 @@ export async function listConsents(): Promise<ConsentItem[]> {
 
 export interface GrantConsentBody {
   subject_id?: number
+  file_ids?: number[]
   scope?: string
   granted_to_role?: string
   granted_to_user_id?: number
   granted_to_hospital_id?: string
   granted_to_hospital_name?: string
   expires_at?: string
+  expires_days?: number
 }
 
 export async function grantConsent(body: GrantConsentBody): Promise<ConsentItem> {
@@ -125,15 +127,25 @@ export async function downloadFile(fileId: number, filename: string): Promise<vo
 export interface AccessRequest {
   id: number
   requester_id: number
+  requester_name?: string | null
   requester_email: string
   requester_role: string
+  patient_id?: number | null
+  patient_name?: string | null
   file_id: number | null
+  file_ids?: number[] | null
   scope: string | null
   reason: string
+  urgency?: string
   status: 'pending' | 'approved' | 'denied' | 'expired'
   requested_at: string
   resolved_at: string | null
   resolved_by: number | null
+  resolved_by_name?: string | null
+  is_emergency?: boolean
+  is_proxy?: boolean
+  requester_hospital_id?: string | null
+  target_hospital_id?: string | null
 }
 
 export interface AccessRequestList {
@@ -143,10 +155,27 @@ export interface AccessRequestList {
   page_size: number
 }
 
-export interface CreateAccessRequestBody {
-  file_id?: number
+export interface ConsentRequestBody {
+  patient_id: number
+  file_ids?: number[]
   scope?: string
   reason: string
+  urgency?: 'normal' | 'urgent' | 'emergency'
+  target_hospital_id?: string
+  target_hospital_name?: string
+}
+
+export interface EmergencyOverrideBody {
+  patient_id: number
+  file_ids: number[]
+  reason: string
+  clinical_justification: string
+}
+
+export interface ProxyApprovalBody {
+  request_id: number
+  proxy_reason: string
+  verification_method: 'verbal' | 'written' | 'witness'
 }
 
 export async function listAccessRequests(status?: string, page = 1): Promise<AccessRequestList> {
@@ -156,10 +185,35 @@ export async function listAccessRequests(status?: string, page = 1): Promise<Acc
   return api(`/access-requests?${params.toString()}`)
 }
 
-export async function createAccessRequest(fileId: number | null, scope: string, reason: string): Promise<AccessRequest> {
+export async function listPendingForMe(page = 1): Promise<AccessRequestList> {
+  return api(`/access-requests/pending-for-me?page=${page}`)
+}
+
+export async function sendConsentRequest(body: ConsentRequestBody): Promise<AccessRequest> {
+  return api('/access-requests/consent-request', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function emergencyOverride(body: EmergencyOverrideBody): Promise<AccessRequest> {
+  return api('/access-requests/emergency-override', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function proxyApproval(body: ProxyApprovalBody): Promise<AccessRequest> {
+  return api('/access-requests/proxy-approval', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function createAccessRequest(body: ConsentRequestBody): Promise<AccessRequest> {
   return api('/access-requests', {
     method: 'POST',
-    body: JSON.stringify({ file_id: fileId, scope, reason })
+    body: JSON.stringify(body),
   })
 }
 
@@ -169,6 +223,42 @@ export async function approveAccessRequest(requestId: number, expiresDays = 30):
 
 export async function denyAccessRequest(requestId: number): Promise<AccessRequest> {
   return api<AccessRequest>(`/access-requests/${requestId}/deny`, { method: 'PUT' })
+}
+
+// ============ PATIENT CONSENT PORTAL ============
+
+export interface PatientFile {
+  id: number
+  filename: string
+  original_filename: string
+  file_size: number
+  content_type: string | null
+  upload_timestamp: string
+  description: string | null
+  has_active_consent: boolean
+  consent_count: number
+}
+
+export async function getMyFiles(): Promise<PatientFile[]> {
+  return api<PatientFile[]>('/consent/my-files')
+}
+
+export interface ConsentNotification {
+  id: number
+  title: string
+  message: string
+  type: string
+  read: boolean
+  link: string | null
+  created_at: string
+}
+
+export async function getMyNotifications(unreadOnly = false): Promise<ConsentNotification[]> {
+  return api<ConsentNotification[]>(`/consent/my-notifications?unread_only=${unreadOnly}`)
+}
+
+export async function markNotificationRead(notificationId: number): Promise<void> {
+  await api(`/consent/notifications/${notificationId}/read`, { method: 'PUT' })
 }
 
 export interface AuditEvent {
@@ -416,4 +506,88 @@ export async function getPatient(patientId: number): Promise<Patient> {
 
 export async function getPatientFiles(patientId: number): Promise<{ patient_id: number; patient_name: string; files: FileInfo[] }> {
   return api(`/patients/${patientId}/files`)
+}
+
+// ============ FEDERATION API ============
+
+export interface FederationPeer {
+  id: string
+  name: string
+  endpoint: string
+  status: string
+  certificate_fingerprint?: string
+  last_seen?: string
+}
+
+export interface FederationNetworkStatus {
+  hospital_id: string
+  peers: FederationPeer[]
+  total_peers: number
+}
+
+export async function getFederationNetworkStatus(): Promise<FederationNetworkStatus> {
+  return api<FederationNetworkStatus>('/federation/network/status')
+}
+
+// ============ FEDERATION TRANSFER API ============
+
+export interface TransferPeer {
+  hospital_id: string
+  hospital_name: string
+  api_endpoint: string
+  grpc_endpoint: string
+  source: string
+}
+
+export interface TransferStatus {
+  id: number
+  transfer_id: string
+  direction: 'sent' | 'received'
+  source_hospital_id: string
+  source_hospital_name: string | null
+  dest_hospital_id: string
+  dest_hospital_name: string | null
+  original_filename: string
+  file_size: number | null
+  patient_name: string | null
+  patient_mrn: string | null
+  status: 'pending' | 'in_progress' | 'completed' | 'failed'
+  initiated_at: string | null
+  completed_at: string | null
+  error_message: string | null
+}
+
+export async function getTransferPeers(): Promise<{ peers: TransferPeer[]; total: number }> {
+  return api('/federation/transfer/peers')
+}
+
+export async function shareFileToHospital(
+  fileId: number,
+  targetHospitalId: string,
+  targetEndpoint: string,
+  reason: string = 'Clinical consultation'
+): Promise<{ success: boolean; transfer_id: string; status: string; message: string }> {
+  return api('/federation/transfer/share', {
+    method: 'POST',
+    body: JSON.stringify({
+      file_id: fileId,
+      target_hospital_id: targetHospitalId,
+      target_hospital_endpoint: targetEndpoint,
+      reason,
+    }),
+  })
+}
+
+export async function getTransferHistory(
+  direction?: 'sent' | 'received',
+  limit: number = 50
+): Promise<TransferStatus[]> {
+  const params = new URLSearchParams()
+  if (direction) params.set('direction', direction)
+  params.set('limit', limit.toString())
+  return api(`/federation/transfer/history?${params}`)
+}
+
+export async function getTransferStatus(transferId: string): Promise<TransferStatus> {
+  return api(`/federation/transfer/status/${transferId}`)
 }

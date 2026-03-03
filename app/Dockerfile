@@ -17,6 +17,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Generate Python protobuf stubs from federation.proto if available
+# grpcio-tools is already in requirements.txt
+RUN if [ -f proto/federation.proto ]; then \
+      python -m grpc_tools.protoc \
+        -I proto \
+        --python_out=proto \
+        --grpc_python_out=proto \
+        proto/federation.proto && \
+      sed -i 's/^import federation_pb2 as/from . import federation_pb2 as/' proto/federation_pb2_grpc.py && \
+      echo "✓ Python proto stubs generated"; \
+    else \
+      echo "⚠ No proto/federation.proto found, using existing stubs"; \
+    fi
+
 # Expose port
 EXPOSE 8000
 

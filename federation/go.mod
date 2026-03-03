@@ -5,7 +5,9 @@ go 1.21
 require (
 	github.com/IBM/sarama v1.42.1
 	github.com/golang-jwt/jwt/v5 v5.2.0
+	github.com/libp2p/go-libp2p v0.33.2
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/multiformats/go-multiaddr v0.12.3
 	google.golang.org/grpc v1.60.1
 )
 

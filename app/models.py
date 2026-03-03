@@ -31,6 +31,13 @@ class User(Base):
     hospital_id = Column(String(100), index=True)  # e.g., "hospital-a", "hospital-b"
     hospital_name = Column(String(255))  # Human-readable name
     
+    # Link to patient record (unifies users and patients tables)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True, unique=True, index=True)
+    
+    # Invitation token for doctor/admin-created patient accounts to set their password
+    invitation_token = Column(String(255), nullable=True, unique=True, index=True)
+    invitation_expires_at = Column(DateTime(timezone=True), nullable=True)
+    
     # Profile fields
     phone = Column(String(50))
     department = Column(String(100))
@@ -262,4 +269,51 @@ class Notification(Base):
 
     def __repr__(self):
         return f"<Notification(id={self.id}, user_id={self.user_id}, type='{self.type}', read={self.read})>"
+
+
+class FederationTransfer(Base):
+    """Track cross-hospital file transfers with patient metadata"""
+    __tablename__ = "federation_transfers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Transfer identifiers
+    transfer_id = Column(String(100), unique=True, nullable=False, index=True)  # UUID for tracking
+    direction = Column(String(10), nullable=False)  # 'sent' or 'received'
+    
+    # Source hospital
+    source_hospital_id = Column(String(100), nullable=False, index=True)
+    source_hospital_name = Column(String(255))
+    
+    # Destination hospital
+    dest_hospital_id = Column(String(100), nullable=False, index=True)
+    dest_hospital_name = Column(String(255))
+    
+    # File info
+    file_id = Column(Integer, ForeignKey("file_metadata.id"), nullable=True)  # Local file_metadata.id
+    original_filename = Column(String(255), nullable=False)
+    file_size = Column(Integer)
+    content_type = Column(String(100))
+    checksum = Column(String(64))  # SHA256
+    
+    # Patient info carried with the transfer
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True)  # Local patient id
+    patient_name = Column(String(255))  # Name sent in transfer
+    patient_mrn = Column(String(100))  # MRN sent in transfer
+    patient_dob = Column(Date)
+    
+    # Consent/access
+    consent_id = Column(Integer, ForeignKey("consents.id"), nullable=True)
+    access_request_id = Column(Integer, ForeignKey("access_requests.id"), nullable=True)
+    
+    # Status tracking
+    status = Column(String(50), nullable=False, default="pending")  # pending, in_progress, completed, failed
+    error_message = Column(Text)
+    
+    # Timestamps
+    initiated_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True))
+    
+    def __repr__(self):
+        return f"<FederationTransfer(id={self.id}, transfer_id='{self.transfer_id}', direction='{self.direction}', status='{self.status}')>"
 

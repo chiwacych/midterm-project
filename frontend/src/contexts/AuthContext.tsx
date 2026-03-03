@@ -6,6 +6,7 @@ export interface User {
   full_name: string | null
   role: string
   is_active: boolean
+  patient_id: number | null
 }
 
 interface AuthContextType {

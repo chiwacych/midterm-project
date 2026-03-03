@@ -1,0 +1,66 @@
+# Makefile for Hospital B Deployment
+# Complete production-ready deployment to multipass VM
+
+.PHONY: all build deploy start stop clean logs help status
+
+VM_NAME := hospital-b
+HOSPITAL_ID := hospital-b
+HOSPITAL_NAME := Hospital B
+VM_PATH := /home/ubuntu/medimage
+PEER_HOSPITAL := hospital-a
+PEER_ENDPOINT := hospital-a.local:50051
+
+all: build deploy start
+
+help:
+	@echo "Hospital B Deployment Makefile"
+	@echo "=============================="
+	@echo ""
+	@echo "Targets:"
+	@echo "  make build      - Build application locally"
+	@echo "  make deploy     - Deploy to VM (transfer files)"
+	@echo "  make start      - Start services on VM"
+	@echo "  make stop       - Stop services on VM"
+	@echo "  make restart    - Restart services on VM"
+	@echo "  make clean      - Clean VM deployment"
+	@echo "  make logs       - View service logs"
+	@echo "  make status     - Check service status"
+	@echo "  make shell      - SSH into VM"
+	@echo "  make all        - Build + Deploy + Start (complete deployment)"
+	@echo ""
+
+build:
+	@echo "🔨 Building application..."
+	@cd frontend && npm install && npm run build
+	@echo "✓ Frontend built"
+
+deploy:
+	@pwsh -NoProfile -Command "& { .\scripts\deploy-to-vm.ps1 -VM $(VM_NAME) -HospitalID $(HOSPITAL_ID) -HospitalName '$(HOSPITAL_NAME)' -PeerHospital $(PEER_HOSPITAL) -PeerEndpoint $(PEER_ENDPOINT) }"
+
+start:
+	@echo "🚀 Starting services on VM..."
+	@multipass exec $(VM_NAME) -- sudo bash $(VM_PATH)/start.sh
+
+stop:
+	@echo "🛑 Stopping services on VM..."
+	@multipass exec $(VM_NAME) -- sudo docker-compose -f $(VM_PATH)/docker-compose.yml down
+
+restart:
+	@echo "🔄 Restarting services on VM..."
+	@multipass exec $(VM_NAME) -- sudo docker-compose -f $(VM_PATH)/docker-compose.yml restart
+
+clean:
+	@echo "🧹 Cleaning VM..."
+	@multipass exec $(VM_NAME) -- sudo docker-compose -f $(VM_PATH)/docker-compose.yml down -v
+	@multipass exec $(VM_NAME) -- sudo rm -rf $(VM_PATH)/*
+	@echo "✓ VM cleaned"
+
+logs:
+	@multipass exec $(VM_NAME) -- sudo docker-compose -f $(VM_PATH)/docker-compose.yml logs -f
+
+status:
+	@echo "📊 Service Status:"
+	@multipass exec $(VM_NAME) -- sudo docker-compose -f $(VM_PATH)/docker-compose.yml ps
+
+shell:
+	@multipass shell $(VM_NAME)

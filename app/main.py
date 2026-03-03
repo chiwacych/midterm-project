@@ -29,6 +29,9 @@ from routers.profile import router as profile_router
 from routers.compliance import router as compliance_router
 from routers.access_requests import router as access_requests_router
 from routers.patients import router as patients_router
+from routers.federation_network import router as federation_network_router
+from routers.federation_registry import router as federation_registry_router
+from routers.federation_transfer import router as federation_transfer_router
 import metrics
 import audit
 from federation_client import federation_health, federation_check_duplicate
@@ -49,6 +52,9 @@ app.include_router(profile_router)
 app.include_router(compliance_router)
 app.include_router(access_requests_router)
 app.include_router(patients_router)
+app.include_router(federation_network_router)
+app.include_router(federation_registry_router)
+app.include_router(federation_transfer_router)
 
 # CORS - Dynamic configuration
 # In production, set CORS_ORIGINS environment variable
@@ -97,6 +103,13 @@ metrics.initialize_system_info()
 # Mount static files directory
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Mount frontend build directory for React SPA
+frontend_dist = "/app/frontend/dist"
+if os.path.exists(frontend_dist):
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="frontend-assets")
 
 # Templates
 templates = Jinja2Templates(directory="templates")
@@ -238,33 +251,150 @@ async def startup_event():
     asyncio.create_task(periodic_node_health_check())
     print("✓ Node health monitoring task started")
     
-    print("✓ System startup complete!")
+    # Auto self-register in federation on every startup so a VM restart doesn't
+    # require a manual "Self-Register" click in the UI.
+    asyncio.create_task(auto_federation_self_register())
+    print("✓ Federation auto-registration task started")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    global background_tasks_running
-    background_tasks_running = False
-    print("🛑 Shutting down background tasks...")
+async def auto_federation_self_register():
+    """
+    Automatically self-register this hospital node in the federation registry
+    on every startup.  Retries until the gRPC federation service is healthy
+    so that start-order races (e.g. after a VM restart) don't cause a permanent
+    failure requiring a manual UI click.
+    """
+    import os
+
+    # Ensure the data directory exists so the registry JSON can be persisted.
+    os.makedirs("data", exist_ok=True)
+
+    hospital_id   = os.getenv("HOSPITAL_ID",   "hospital-a")
+    hospital_name = os.getenv("HOSPITAL_NAME", "Hospital A")
+    cert_path     = os.getenv("TLS_CERT_FILE", f"certs/{hospital_id}-cert.pem")
+    key_path      = os.getenv("TLS_KEY_FILE",  f"certs/{hospital_id}-key.pem")
+    ca_cert_path  = os.getenv("TLS_CA_FILE",   "certs/ca-cert.pem")
+
+    if not all(os.path.exists(p) for p in [cert_path, ca_cert_path, key_path]):
+        print("⚠ Federation auto-registration skipped: certificate files not found")
+        return
+
+    # Wait for gRPC federation service to become healthy (up to 90 s).
+    max_wait = 90
+    waited   = 0
+    interval = 5
+    while waited < max_wait:
+        health = federation_health()
+        if health and health.get("ok"):
+            break
+        await asyncio.sleep(interval)
+        waited += interval
+
+    if waited >= max_wait:
+        print("⚠ Federation auto-registration skipped: gRPC service did not become healthy in time")
+        return
+
+    try:
+        from routers.federation_registry import get_registry
+        from federation_registry import create_hospital_metadata
+
+        # Resolve the host IP (injected by start.sh, or fall back to socket).
+        ip_address = os.getenv("HOST_IP", "").strip().strip("\\")
+        if not ip_address:
+            try:
+                import socket
+                ip_address = socket.gethostbyname(socket.gethostname())
+            except Exception:
+                ip_address = "localhost"
+
+        metadata = create_hospital_metadata(
+            hospital_id=hospital_id,
+            hospital_name=hospital_name,
+            organization=f"{hospital_name} Medical Center",
+            federation_endpoint=f"{ip_address}:50051",
+            api_endpoint=f"http://{ip_address}:8000",
+            cert_path=cert_path,
+            ca_cert_path=ca_cert_path,
+            private_key_path=key_path,
+            contact_email=f"admin@{hospital_id}.local",
+        )
+
+        registry = get_registry()
+        result   = registry.register_hospital(metadata)
+
+        if result.get("success"):
+            registry.export_registry("data/federation-registry.json")
+            print(f"✓ Federation auto-registration successful: {hospital_id}")
+        else:
+            # "already registered" is not an error after restart; log as info.
+            print(f"ℹ Federation auto-registration: {result.get('error', 'already registered')}")
+
+        # ── Announce ourselves to peers & pull their registries ──
+        # This mirrors the manual /self-register endpoint behaviour and is
+        # the critical step that was previously missing, causing discovery
+        # to "only work once" (i.e. only on manual self-register).
+        try:
+            from routers.federation_registry import _announce_to_peers, _pull_remote_registries
+            await _announce_to_peers(metadata)
+            imported = await _pull_remote_registries()
+            if imported:
+                registry.export_registry("data/federation-registry.json")
+            print(f"✓ Federation peer sync done (imported {imported} peer(s))")
+        except Exception as sync_exc:
+            print(f"⚠ Federation peer sync failed (will retry via discovery service): {sync_exc}")
+
+    except Exception as exc:
+        print(f"⚠ Federation auto-registration failed: {exc}")
+
+    # ── Start peer discovery service AFTER registration is complete ──
+    # Previously this ran at startup before registration, so the first
+    # discovery cycle always found an empty registry.
+    try:
+        from peer_discovery import start_discovery_service
+        asyncio.create_task(start_discovery_service())
+        print("✓ Peer discovery service started (post-registration)")
+    except Exception as e:
+        print(f"⚠ Peer discovery service failed to start: {e}")
 
 
+# React SPA Routes - Serve index.html for all non-API routes
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    """Redirect to admin dashboard by default"""
-    return templates.TemplateResponse("index.html", {"request": request})
+async def home():
+    """Serve React frontend"""
+    frontend_dist = "/app/frontend/dist"
+    index_file = os.path.join(frontend_dist, "index.html")
+    
+    if os.path.exists(index_file):
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not found")
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request):
-    """Serve the admin dashboard"""
-    return templates.TemplateResponse("index.html", {"request": request})
+async def admin_dashboard():
+    """Serve React frontend (handles routing client-side)"""
+    frontend_dist = "/app/frontend/dist"
+    index_file = os.path.join(frontend_dist, "index.html")
+    
+    if os.path.exists(index_file):
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not found")
 
 
 @app.get("/user", response_class=HTMLResponse)
-async def user_portal(request: Request):
-    """Serve the user portal"""
-    return templates.TemplateResponse("user.html", {"request": request})
+async def user_portal():
+    """Serve React frontend (handles routing client-side)"""
+    frontend_dist = "/app/frontend/dist"
+    index_file = os.path.join(frontend_dist, "index.html")
+    
+    if os.path.exists(index_file):
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not found")
 
 
 @app.post("/api/upload")
@@ -273,10 +403,11 @@ async def upload_file(
     description: str = Form(default=""),
     patient_id: Optional[int] = Form(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
 ):
     """
     Upload a file to the distributed file system - Patient-centered for DPA compliance
+    - Only doctors and admins can upload files
     - Requires patient_id to link file to patient record
     - Uploads to all MinIO nodes for redundancy
     - Stores metadata in PostgreSQL
@@ -295,11 +426,6 @@ async def upload_file(
     patient = db.query(Patient).filter(Patient.id == patient_id, Patient.is_active == True).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found or inactive")
-    
-    # Access control: patients can only upload to their own record
-    if current_user.role == "patient":
-        if patient.email != current_user.email and patient.phone != current_user.phone:
-            raise HTTPException(status_code=403, detail="You can only upload files to your own patient record")
     
     upload_start_time = datetime.now()
     
@@ -433,17 +559,20 @@ async def list_files(
     user_id: Optional[str] = None,
     patient_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(optional_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    List all files in the system.
-    When authenticated: patients see only their files; doctors/admins see all.
-    Supports filtering by patient_id for patient-centered access.
+    List files in the system.
+    Patients see only files linked to their patient record.
+    Doctors/admins see all files (with optional filters).
     """
     try:
-        # RBAC: patients see only their files unless user_id filter is not applicable
-        if current_user and current_user.role == "patient":
-            user_id = str(current_user.id)
+        # RBAC: patients see only their own files (linked via patient_id on User)
+        if current_user.role == "patient":
+            if current_user.patient_id:
+                patient_id = current_user.patient_id
+            else:
+                user_id = str(current_user.id)
         cache_key = f"files:list:{user_id or 'all'}:{patient_id or 'all'}"
         cached_files = redis_cache.get(cache_key)
 
@@ -638,20 +767,17 @@ async def download_file(
 async def delete_file(
     file_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
 ):
     """
     Delete a file from the distributed system.
-    Patients can delete only their own files; admins can delete any.
+    Only doctors and admins can delete files.
     """
     try:
         # Get file metadata
         file_meta = db.query(FileMetadata).filter(FileMetadata.id == file_id).first()
         if not file_meta:
             raise HTTPException(status_code=404, detail="File not found")
-        # RBAC: patient can delete only own files
-        if current_user.role == "patient" and file_meta.user_id != str(current_user.id):
-            raise HTTPException(status_code=403, detail="Not allowed to delete this file")
         
         # Delete from all MinIO nodes
         delete_results = minio_cluster.delete_file_from_all_nodes(
@@ -684,7 +810,10 @@ async def delete_file(
 
 
 @app.get("/api/nodes/health")
-async def get_nodes_health(db: Session = Depends(get_db)):
+async def get_nodes_health(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
+):
     """
     Get health status of all MinIO nodes
     - Checks connectivity to each node
@@ -736,7 +865,10 @@ async def get_federation_health():
 
 
 @app.get("/api/stats")
-async def get_system_stats(db: Session = Depends(get_db)):
+async def get_system_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
+):
     """Get system statistics"""
     try:
         total_files = db.query(FileMetadata).filter(FileMetadata.is_deleted == False).count()
@@ -779,24 +911,49 @@ async def get_dashboard_data(
     from models import Patient, Consent, AccessRequest, Notification
     
     try:
-        # Basic stats
-        total_files = db.query(FileMetadata).filter(FileMetadata.is_deleted == False).count()
-        total_size = db.query(FileMetadata).filter(FileMetadata.is_deleted == False).with_entities(
-            func.sum(FileMetadata.file_size)
-        ).scalar() or 0
+        # Role-based dashboard data
+        is_patient = current_user.role == "patient"
         
-        total_uploads = db.query(UploadLog).count()
-        successful_uploads = db.query(UploadLog).filter(UploadLog.status == "success").count()
-        
-        # Patient stats (for doctors/admins)
-        total_patients = 0
-        if current_user.role in ["doctor", "admin"]:
+        if is_patient:
+            # Patients see only their own file stats
+            patient_filter = []
+            if current_user.patient_id:
+                patient_filter.append(FileMetadata.patient_id == current_user.patient_id)
+            else:
+                patient_filter.append(FileMetadata.user_id == str(current_user.id))
+            
+            total_files = db.query(FileMetadata).filter(
+                FileMetadata.is_deleted == False, *patient_filter
+            ).count()
+            total_size = db.query(FileMetadata).filter(
+                FileMetadata.is_deleted == False, *patient_filter
+            ).with_entities(func.sum(FileMetadata.file_size)).scalar() or 0
+            total_uploads = 0
+            successful_uploads = 0
+            total_patients = 0
+        else:
+            # Doctors/admins see system-wide stats
+            total_files = db.query(FileMetadata).filter(FileMetadata.is_deleted == False).count()
+            total_size = db.query(FileMetadata).filter(FileMetadata.is_deleted == False).with_entities(
+                func.sum(FileMetadata.file_size)
+            ).scalar() or 0
+            total_uploads = db.query(UploadLog).count()
+            successful_uploads = db.query(UploadLog).filter(UploadLog.status == "success").count()
             total_patients = db.query(Patient).filter(Patient.is_active == True).count()
         
         # Query pending access requests from database
-        pending_access_requests = db.query(AccessRequest).filter(
-            AccessRequest.status == "pending"
-        ).order_by(AccessRequest.requested_at.desc()).limit(5).all()
+        if is_patient:
+            # Patients see only requests targeting their patient record
+            pending_query = db.query(AccessRequest).filter(
+                AccessRequest.status == "pending"
+            )
+            if current_user.patient_id:
+                pending_query = pending_query.filter(AccessRequest.patient_id == current_user.patient_id)
+            pending_access_requests = pending_query.order_by(AccessRequest.requested_at.desc()).limit(5).all()
+        else:
+            pending_access_requests = db.query(AccessRequest).filter(
+                AccessRequest.status == "pending"
+            ).order_by(AccessRequest.requested_at.desc()).limit(5).all()
         
         # Format access requests
         access_requests_list = []
@@ -837,26 +994,27 @@ async def get_dashboard_data(
                 "created_at": notif.created_at.isoformat() if notif.created_at else None
             })
         
-        # Node health status
+        # Node health status (only for doctors/admins)
         node_health = []
-        for node_id in ["minio1", "minio2", "minio3"]:
-            cached_health = redis_cache.get_node_health(node_id)
-            if cached_health:
-                node_health.append(cached_health)
-            else:
-                # Get from database
-                node_record = db.query(NodeHealth).filter(NodeHealth.node_name == node_id).first()
-                if node_record:
-                    node_health.append({
-                        "id": node_record.node_name,
-                        "name": node_record.node_name.upper(),
-                        "endpoint": node_record.endpoint,
-                        "healthy": node_record.is_healthy,
-                        "status": "healthy" if node_record.is_healthy else "offline",
-                        "last_check": node_record.last_check.isoformat() if node_record.last_check else None,
-                        "total_files": node_record.total_files,
-                        "total_size": node_record.total_size
-                    })
+        if not is_patient:
+            for node_id in ["minio1", "minio2", "minio3"]:
+                cached_health = redis_cache.get_node_health(node_id)
+                if cached_health:
+                    node_health.append(cached_health)
+                else:
+                    # Get from database
+                    node_record = db.query(NodeHealth).filter(NodeHealth.node_name == node_id).first()
+                    if node_record:
+                        node_health.append({
+                            "id": node_record.node_name,
+                            "name": node_record.node_name.upper(),
+                            "endpoint": node_record.endpoint,
+                            "healthy": node_record.is_healthy,
+                            "status": "healthy" if node_record.is_healthy else "offline",
+                            "last_check": node_record.last_check.isoformat() if node_record.last_check else None,
+                            "total_files": node_record.total_files,
+                            "total_size": node_record.total_size
+                        })
         
         return {
             "status": "success",
@@ -886,7 +1044,8 @@ async def get_dashboard_data(
 @app.get("/api/replication/verify/{file_id}")
 async def verify_replication(
     file_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
 ):
     """Verify that a file is properly replicated across all nodes"""
     try:
@@ -929,7 +1088,8 @@ async def verify_replication(
 @app.post("/api/replication/sync/{file_id}")
 async def sync_replication(
     file_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
 ):
     """Sync/repair replication for a file by copying it to missing nodes"""
     try:
@@ -1051,7 +1211,10 @@ async def sync_replication(
 
 
 @app.post("/api/replication/sync-all")
-async def sync_all_files(db: Session = Depends(get_db)):
+async def sync_all_files(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin"])),
+):
     """Sync replication for all files using robust replication manager"""
     try:
         result = await replication_manager.sync_all(db, priority_recent=True)
@@ -1061,7 +1224,11 @@ async def sync_all_files(db: Session = Depends(get_db)):
 
 
 @app.get("/api/files/{file_id}/versions")
-async def get_file_versions(file_id: int, db: Session = Depends(get_db)):
+async def get_file_versions(
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
+):
     """Get all versions of a file"""
     try:
         # Get file metadata
@@ -1089,7 +1256,8 @@ async def get_file_versions(file_id: int, db: Session = Depends(get_db)):
 async def download_file_version(
     file_id: int,
     version_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["doctor", "admin"])),
 ):
     """Download a specific version of a file"""
     try:
@@ -1126,7 +1294,8 @@ async def download_file_version(
 async def delete_file_version(
     file_id: int,
     version_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin"])),
 ):
     """Delete a specific version of a file"""
     try:
@@ -1151,6 +1320,20 @@ async def delete_file_version(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting version: {str(e)}")
+
+
+# Serve React frontend for all non-API routes (SPA catch-all)
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """Serve React frontend for all routes that don't match API endpoints"""
+    frontend_dist = "/app/frontend/dist"
+    index_file = os.path.join(frontend_dist, "index.html")
+    
+    if os.path.exists(index_file):
+        with open(index_file, 'r', encoding='utf-8') as f:
+            return HTMLResponse(content=f.read())
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not found. Please build the frontend first.")
 
 
 if __name__ == "__main__":

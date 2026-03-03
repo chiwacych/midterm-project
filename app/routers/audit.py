@@ -15,6 +15,23 @@ from auth import get_current_user
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 
+def _parse_details(raw: Optional[str]) -> Optional[dict]:
+    """Safely parse the JSON details column.
+    
+    If the stored value decodes to a plain string (not a dict), wrap it
+    in {"message": ...} so the Pydantic response model is always satisfied.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"message": str(parsed)}
+    except (json.JSONDecodeError, TypeError):
+        return {"message": raw}
+
+
 class AuditEventResponse(BaseModel):
     id: int
     timestamp: str
@@ -158,7 +175,7 @@ def list_audit_events(
                 user_agent=e.user_agent,
                 status=e.status,
                 severity=e.severity,
-                details=json.loads(e.details) if e.details else None
+                details=_parse_details(e.details)
             )
             for e in events
         ],
@@ -196,5 +213,5 @@ def get_audit_event(
         user_agent=audit.user_agent,
         status=audit.status,
         severity=audit.severity,
-        details=json.loads(audit.details) if audit.details else None
+        details=_parse_details(audit.details)
     )

@@ -1,7 +1,8 @@
 """Patient management API for DPA-compliant medical data storage."""
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import hashlib
+import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from sqlalchemy import or_, and_
 from database import get_db
 from models import Patient, User, FileMetadata
 from routers.auth import get_current_user
+from auth import hash_password
 from audit import log_audit_event
 
 
@@ -138,6 +140,30 @@ def create_patient(
     db.commit()
     db.refresh(patient)
     
+    # Auto-create User account for the patient (with invitation token)
+    invitation_token = None
+    if body.email:
+        existing_user = db.query(User).filter(User.email == body.email).first()
+        if existing_user:
+            # Link existing user to patient record if not already linked
+            if not existing_user.patient_id:
+                existing_user.patient_id = patient.id
+                db.commit()
+        else:
+            # Create user account with invitation token
+            invitation_token = secrets.token_urlsafe(32)
+            user_account = User(
+                email=body.email,
+                hashed_password=hash_password(secrets.token_urlsafe(64)),  # placeholder
+                full_name=body.full_name,
+                role="patient",
+                patient_id=patient.id,
+                invitation_token=invitation_token,
+                invitation_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            )
+            db.add(user_account)
+            db.commit()
+    
     # Audit log
     log_audit_event(
         db=db,
@@ -150,7 +176,7 @@ def create_patient(
         status="success"
     )
     
-    return PatientResponse(
+    response = PatientResponse(
         id=patient.id,
         full_name=patient.full_name,
         email=patient.email,
@@ -162,6 +188,10 @@ def create_patient(
         is_active=patient.is_active,
         file_count=0
     )
+    result = response.model_dump()
+    if invitation_token:
+        result["invitation_token"] = invitation_token
+    return result
 
 
 @router.get("", response_model=List[PatientResponse])

@@ -68,29 +68,53 @@ coverage.xml
 # Static files
 app/static/uploads/
 
-#custom ignores
+# Custom ignores
 DST 4010 - Project 2.txt
+
+# Diagrams source files (not for VCS)
 drawio/
 
+# TLS/mTLS certificates and private keys (security — never commit)
+certs/
+federation/certs/
 
-#Vite / Node.js
-!**/glob-import/dir/node_modules
+# Stale / generated build artefacts
+app/frontend/
+frontend/dist/
+frontend/node_modules/
+
+# Docs that are migration/transition notes, not system descriptions
+docs/migration-roadmap.md
+docs/migrations.md
+docs/chapter2&3_instructions.txt
+docs/medimage_dfs_timeline_revised.csv
+
+# Root-level loose operational / status notes (not system descriptions)
+DEPLOYMENT_FIXES.md
+DEPLOYMENT_STATUS.md
+QUICK_REFERENCE.txt
+REACT_FRONTEND_ACCESS.md
+UI_ACCESS_GUIDE.md
+
+# PowerShell redirect artifact
+$null
+
+# Node / Vite
 .DS_Store
 .idea
 .pnpm-store
 *.cpuprofile
 *.local
-*.log
 /.vscode/
 /docs/.vitepress/cache
 /docs/.vitepress/.temp
-/packages/vite/LICENSE
-dist
 dist-ssr
 explorations
 node_modules
 playground-temp
-temp
 TODOs.md
 .eslintcache
-frontend/node_modules/
+/docs/ui_screenshots/
+docs/APT3065_Complete_Project_Proposal.md
+docs/System UML Diagrams and UI Screenshots.md
+docs/theme-system.md
