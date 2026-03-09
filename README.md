@@ -22,30 +22,40 @@ A **federated, fault-tolerant medical imaging storage and exchange platform** th
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         HOSPITAL A (Multipass VM)                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  FastAPI + React Frontend                                            │    │
-│  │  • REST API  • Web UI  • Metadata Management  • Replication Control  │    │
-│  └────────────────────┬─────────────────────────────────────────────────┘    │
-│            ┌──────────┼─────────────┐                                        │
-│            ▼          ▼             ▼                                        │
-│    ┌────────────┬────────────┬────────────┐                                 │
-│    │  MinIO-1   │  MinIO-2   │  MinIO-3   │  ◄─ 3-Node Cluster (Erasure)   │
-│    └────────────┴────────────┴────────────┘                                 │
-│    ┌────────────────────────────────────────┐                               │
-│    │  PostgreSQL (Primary + 2 Replicas)     │  ◄─ Streaming Replication     │
-│    └────────────────────────────────────────┘                               │
-│    ┌──────────────┬─────────────┬───────────────────┐                      │
-│    │ Redis Cache  │ Kafka Broker│ gRPC Federation   │                      │
-│    │ (Metadata)   │ (Audit Log) │ Service (Go+mTLS) │                      │
-│    └──────────────┴─────────────┴───────────────────┘                      │
-└──────────────────────────────┬───────────────────────────────────────────────┘
-                               │ mTLS gRPC (port 50051)
-┌──────────────────────────────┴───────────────────────────────────────────────┐
-│                         HOSPITAL B … N (same stack)                           │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph HospA["🏥 Hospital A (Multipass VM)"]
+        direction TB
+        App["<b>FastAPI + React Frontend</b><br/>REST API · Web UI · Metadata · Replication"]
+
+        subgraph Storage["Object Storage — 3-Node MinIO Cluster (Erasure Coding)"]
+            M1["MinIO-1"]
+            M2["MinIO-2"]
+            M3["MinIO-3"]
+        end
+
+        subgraph DB["Database — Streaming Replication"]
+            PG["PostgreSQL Primary"]
+            R1["Replica 1"]
+            R2["Replica 2"]
+        end
+
+        Redis["Redis Cache<br/>(Metadata)"]
+        Kafka["Kafka Broker<br/>(Audit Log)"]
+        Fed["gRPC Federation<br/>Service (Go + mTLS)"]
+
+        App --> Storage
+        App --> DB
+        App --> Redis
+        App --> Kafka
+        App --> Fed
+    end
+
+    subgraph HospB["🏥 Hospital B … N (same stack)"]
+        FedB["gRPC Federation<br/>Service (Go + mTLS)"]
+    end
+
+    Fed <-- "mTLS gRPC :50051" --> FedB
 ```
 
 Each facility runs **14 Docker services**: FastAPI, Go federation sidecar, 3× MinIO, PostgreSQL primary + 2 replicas, Redis, Kafka, Zookeeper, and Prometheus.
