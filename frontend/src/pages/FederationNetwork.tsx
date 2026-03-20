@@ -6,8 +6,9 @@ import { getTransferHistory, type TransferStatus } from '../api/client'
 interface PeerInfo {
   id: string
   name: string
-  endpoint: string
-  status: 'reachable' | 'unreachable' | string
+  endpoint?: string
+  addresses?: string[]
+  status: 'reachable' | 'connected' | 'unreachable' | string
   latency_ms: number
   mtls_enabled: boolean
 }
@@ -136,6 +137,69 @@ const statusDot = (ok: boolean) => (
 const fmtDate = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString() : '—'
 
+const peerStatusRank = (status: string): number => {
+  if (status === 'reachable') return 2
+  if (status === 'connected') return 1
+  return 0
+}
+
+const preferPeer = (current: PeerInfo, candidate: PeerInfo): PeerInfo => {
+  const currentRank = peerStatusRank(current.status)
+  const candidateRank = peerStatusRank(candidate.status)
+
+  const mergedCurrent: PeerInfo = {
+    ...current,
+    endpoint: current.endpoint || candidate.endpoint,
+    addresses: current.addresses?.length ? current.addresses : candidate.addresses,
+  }
+
+  const mergedCandidate: PeerInfo = {
+    ...candidate,
+    endpoint: candidate.endpoint || current.endpoint,
+    addresses: candidate.addresses?.length ? candidate.addresses : current.addresses,
+  }
+
+  if (candidateRank > currentRank) {
+    return mergedCandidate
+  }
+  if (currentRank > candidateRank) {
+    return mergedCurrent
+  }
+
+  const currentLatency = typeof current.latency_ms === 'number' ? current.latency_ms : -1
+  const candidateLatency = typeof candidate.latency_ms === 'number' ? candidate.latency_ms : -1
+  if (candidateLatency >= 0 && (currentLatency < 0 || candidateLatency < currentLatency)) {
+    return mergedCandidate
+  }
+
+  return mergedCurrent
+}
+
+const dedupeNetworkPeers = (peers: PeerInfo[]): PeerInfo[] => {
+  const byHospitalId = new Map<string, PeerInfo>()
+  const withoutId: PeerInfo[] = []
+
+  for (const peer of peers) {
+    if (!peer) {
+      continue
+    }
+    if (!peer.id) {
+      withoutId.push(peer)
+      continue
+    }
+
+    const existing = byHospitalId.get(peer.id)
+    if (!existing) {
+      byHospitalId.set(peer.id, peer)
+      continue
+    }
+
+    byHospitalId.set(peer.id, preferPeer(existing, peer))
+  }
+
+  return [...byHospitalId.values(), ...withoutId]
+}
+
 /* ── Component ────────────────────────────────────────────── */
 
 type Tab = 'network' | 'registry' | 'transfers'
@@ -170,7 +234,19 @@ export function FederationNetwork() {
         getTransferHistory(undefined, 50).catch(() => [] as TransferStatus[]),
       ])
 
-      if (statusRes.status === 'fulfilled') setNet(statusRes.value as NetworkStatus)
+      if (statusRes.status === 'fulfilled') {
+        const raw = statusRes.value as NetworkStatus
+        const dedupedPeers = dedupeNetworkPeers(raw.peers || [])
+        setNet({
+          ...raw,
+          peers: dedupedPeers,
+          federation: {
+            ...raw.federation,
+            peers_count: dedupedPeers.length,
+            active_connections: dedupedPeers.filter(p => p.status === 'reachable' || p.status === 'connected').length,
+          },
+        })
+      }
       if (registryRes.status === 'fulfilled') setRegistry(registryRes.value as RegistryData)
       if (transfersRes.status === 'fulfilled') setTransfers(transfersRes.value as TransferStatus[])
 
@@ -365,6 +441,7 @@ export function FederationNetwork() {
             <div style={{ display: 'grid', gap: '0.75rem' }}>
               {net.peers.map(peer => {
                 const reachable = peer.status === 'reachable'
+                const endpoint = peer.endpoint || peer.addresses?.[0] || 'N/A'
                 return (
                   <div key={peer.id} style={{ ...card, padding: '1rem 1.25rem', borderLeft: `4px solid ${reachable ? '#10b981' : '#6b7280'}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -376,7 +453,7 @@ export function FederationNetwork() {
                           {peer.mtls_enabled && <span style={badge('#8b5cf6')}>mTLS</span>}
                         </div>
                         <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-                          Endpoint: <code style={{ fontSize: 12 }}>{peer.endpoint}</code>
+                          Endpoint: <code style={{ fontSize: 12 }}>{endpoint}</code>
                           {peer.latency_ms > 0 && <> | Latency: {peer.latency_ms}ms</>}
                         </div>
                       </div>

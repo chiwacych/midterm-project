@@ -13,6 +13,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
 )
 
 // ── Wire types ──
@@ -315,19 +316,71 @@ func (n *Node) RequestPeerExchange(ctx context.Context, targetPeerID peer.ID) {
 		if pid == n.Host.ID() {
 			continue
 		}
-		// Skip if we already know this peer
-		if n.PeerByPeerID(pid) != nil {
+
+		// Parse and store advertised addresses so known peers can be refreshed
+		// after IP/endpoint changes.
+		advertised := make([]ma.Multiaddr, 0, len(entry.Multiaddrs))
+		connectAddrs := make([]string, 0, len(entry.Multiaddrs))
+		seenConnect := make(map[string]struct{})
+		for _, raw := range entry.Multiaddrs {
+			m, err := ma.NewMultiaddr(raw)
+			if err != nil {
+				continue
+			}
+			info, err := peer.AddrInfoFromP2pAddr(m)
+			if err != nil || info.ID != pid {
+				continue
+			}
+			advertised = append(advertised, info.Addrs...)
+			if _, ok := seenConnect[raw]; !ok {
+				seenConnect[raw] = struct{}{}
+				connectAddrs = append(connectAddrs, raw)
+			}
+		}
+		if len(advertised) > 0 {
+			n.Host.Peerstore().AddAddrs(pid, advertised, peerstore.PermanentAddrTTL)
+		}
+
+		// Always refresh metadata for this peer, even when it already exists.
+		n.addOrUpdatePeer(pid, &PeerMeta{
+			PeerID:       pid,
+			HospitalID:   entry.HospitalID,
+			HospitalName: entry.HospitalName,
+			Addresses:    n.Host.Peerstore().Addrs(pid),
+		})
+
+		// If already connected, metadata refresh is enough.
+		if n.Host.Network().Connectedness(pid) == network.Connected {
 			continue
 		}
 
-		log.Printf("peerexchange: discovered new peer %s (%s), connecting...", entry.HospitalID, pid.String()[:16])
+		// If the exchange payload had no usable p2p addrs, try peerstore addrs.
+		if len(connectAddrs) == 0 {
+			for _, a := range n.Host.Peerstore().Addrs(pid) {
+				raw := fmt.Sprintf("%s/p2p/%s", a.String(), pid.String())
+				if _, ok := seenConnect[raw]; ok {
+					continue
+				}
+				seenConnect[raw] = struct{}{}
+				connectAddrs = append(connectAddrs, raw)
+			}
+		}
+		if len(connectAddrs) == 0 {
+			continue
+		}
+
+		label := entry.HospitalID
+		if label == "" {
+			label = "unknown"
+		}
+		log.Printf("peerexchange: (re)connecting to peer %s (%s)...", label, pid.String()[:16])
 		connCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		_, err = n.ConnectToPeer(connCtx, entry.Multiaddrs)
+		_, err = n.ConnectToPeer(connCtx, connectAddrs)
 		cancel()
 		if err != nil {
-			log.Printf("peerexchange: failed to connect to %s: %v", entry.HospitalID, err)
+			log.Printf("peerexchange: failed to connect to %s: %v", label, err)
 		} else {
-			log.Printf("✓ peerexchange: connected to %s (%s)", entry.HospitalID, pid.String()[:16])
+			log.Printf("✓ peerexchange: connected to %s (%s)", label, pid.String()[:16])
 		}
 	}
 }

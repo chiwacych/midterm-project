@@ -256,6 +256,14 @@ async def startup_event():
     asyncio.create_task(auto_federation_self_register())
     print("✓ Federation auto-registration task started")
 
+    # Run discovery continuously even if auto-registration is delayed/fails once.
+    try:
+        from peer_discovery import start_discovery_service
+        asyncio.create_task(start_discovery_service())
+        print("✓ Peer discovery service started")
+    except Exception as e:
+        print(f"⚠ Peer discovery service failed to start: {e}")
+
 
 async def auto_federation_self_register():
     """
@@ -293,6 +301,15 @@ async def auto_federation_self_register():
     if waited >= max_wait:
         print("⚠ Federation auto-registration skipped: gRPC service did not become healthy in time")
         return
+
+    # gRPC is now healthy. Clear the per-peer retry throttle so the fast
+    # reconnect loop can immediately re-dial peers instead of waiting up to
+    # connect_retry_seconds from the (likely failed) startup attempt.
+    try:
+        from peer_discovery import get_discovery_service
+        get_discovery_service().last_connect_attempt.clear()
+    except Exception:
+        pass
 
     try:
         from routers.federation_registry import get_registry
@@ -345,17 +362,6 @@ async def auto_federation_self_register():
 
     except Exception as exc:
         print(f"⚠ Federation auto-registration failed: {exc}")
-
-    # ── Start peer discovery service AFTER registration is complete ──
-    # Previously this ran at startup before registration, so the first
-    # discovery cycle always found an empty registry.
-    try:
-        from peer_discovery import start_discovery_service
-        asyncio.create_task(start_discovery_service())
-        print("✓ Peer discovery service started (post-registration)")
-    except Exception as e:
-        print(f"⚠ Peer discovery service failed to start: {e}")
-
 
 # React SPA Routes - Serve index.html for all non-API routes
 @app.get("/", response_class=HTMLResponse)

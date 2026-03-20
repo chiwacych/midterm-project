@@ -41,21 +41,50 @@ async def get_federation_network_status():
         libp2p_peers = federation_list_peers()
 
         if libp2p_peers:
+            preferred_by_hospital = {}
             for p in libp2p_peers:
                 hid = p.get("hospital_id", "")
                 if not hid or hid == hospital_id:
                     continue
-                seen_ids.add(hid)
-                peers.append({
+
+                addresses = p.get("addresses", [])
+                candidate = {
                     "id": hid,
                     "name": p.get("hospital_name", hid.replace("-", " ").title()),
                     "peer_id": p.get("peer_id", ""),
-                    "addresses": p.get("addresses", []),
+                    "addresses": addresses,
+                    "endpoint": addresses[0] if addresses else "",
                     "status": "reachable" if p.get("reachable") else "connected",
                     "latency_ms": p.get("latency_ms", -1),
                     "mtls_enabled": mtls_enabled,
                     "transport": "libp2p",
-                })
+                }
+
+                existing = preferred_by_hospital.get(hid)
+                if existing is None:
+                    preferred_by_hospital[hid] = candidate
+                    continue
+
+                existing_reachable = existing.get("status") == "reachable"
+                candidate_reachable = candidate.get("status") == "reachable"
+                existing_latency = existing.get("latency_ms", -1)
+                candidate_latency = candidate.get("latency_ms", -1)
+                if existing_latency is None:
+                    existing_latency = -1
+                if candidate_latency is None:
+                    candidate_latency = -1
+
+                if candidate_reachable and not existing_reachable:
+                    preferred_by_hospital[hid] = candidate
+                elif candidate_reachable == existing_reachable:
+                    if candidate_latency >= 0 and (existing_latency < 0 or candidate_latency < existing_latency):
+                        preferred_by_hospital[hid] = candidate
+
+            for hid, selected in preferred_by_hospital.items():
+                seen_ids.add(hid)
+                peers.append(selected)
+
+            peers.sort(key=lambda item: item["id"])
 
         # ── Fallback: env vars + registry + HTTP pings ──
         api_port = os.getenv("API_PORT", "8000")
@@ -287,6 +316,61 @@ async def test_peer_connection(peer_id: str):
 
 
 # ── Peer management endpoints ──
+
+@router.get("/peers")
+async def get_peers():
+    """
+    Backward-compatible peers endpoint used by operational scripts.
+    Returns current libp2p-discovered peers when available.
+    """
+    from federation_client import federation_list_peers
+
+    peers = federation_list_peers()
+    if peers is None:
+        raise HTTPException(status_code=503, detail="gRPC sidecar unavailable")
+
+    hospital_id = os.getenv("HOSPITAL_ID", "hospital-a")
+    normalized_by_hospital = {}
+    for p in peers:
+        hid = p.get("hospital_id", "")
+        if not hid or hid == hospital_id:
+            continue
+
+        candidate = {
+            "peer_id": p.get("peer_id", ""),
+            "hospital_id": hid,
+            "hospital_name": p.get("hospital_name", hid.replace("-", " ").title()),
+            "addresses": p.get("addresses", []),
+            "reachable": bool(p.get("reachable", False)),
+            "latency_ms": p.get("latency_ms", -1),
+        }
+
+        existing = normalized_by_hospital.get(hid)
+        if existing is None:
+            normalized_by_hospital[hid] = candidate
+            continue
+
+        if candidate["reachable"] and not existing["reachable"]:
+            normalized_by_hospital[hid] = candidate
+            continue
+
+        if candidate["reachable"] == existing["reachable"]:
+            cand_latency = candidate.get("latency_ms", -1)
+            existing_latency = existing.get("latency_ms", -1)
+            if cand_latency is None:
+                cand_latency = -1
+            if existing_latency is None:
+                existing_latency = -1
+            if cand_latency >= 0 and (existing_latency < 0 or cand_latency < existing_latency):
+                normalized_by_hospital[hid] = candidate
+
+    normalized = sorted(normalized_by_hospital.values(), key=lambda item: item["hospital_id"])
+
+    return {
+        "peers_count": len(normalized),
+        "peers": normalized,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 @router.post("/peers/add")
 async def add_peer(

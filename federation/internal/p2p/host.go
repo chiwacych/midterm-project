@@ -9,12 +9,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	ma "github.com/multiformats/go-multiaddr"
@@ -50,6 +52,7 @@ type Node struct {
 	HospitalID   string
 	HospitalName string
 	ExternalIP   string // host-level IP reachable from other VMs
+	ctx          context.Context
 
 	// OnTransferReceived is the callback for incoming file transfers.
 	OnTransferReceived TransferHandler
@@ -63,7 +66,7 @@ type Node struct {
 // The identity key is persisted to dataDir/p2p-identity.key so the
 // peer ID is stable across restarts.
 func NewNode(hospitalID, hospitalName string, listenPort int, dataDir string, externalIP string) (*Node, error) {
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Load or generate persistent identity
 	prv, err := loadOrCreateKey(filepath.Join(dataDir, "p2p-identity.key"))
@@ -107,6 +110,7 @@ func NewNode(hospitalID, hospitalName string, listenPort int, dataDir string, ex
 		HospitalID:   hospitalID,
 		HospitalName: hospitalName,
 		ExternalIP:   externalIP,
+		ctx:          ctx,
 		peers:        make(map[peer.ID]*PeerMeta),
 		cancel:       cancel,
 	}
@@ -127,6 +131,10 @@ func NewNode(hospitalID, hospitalName string, listenPort int, dataDir string, ex
 	for _, addr := range h.Addrs() {
 		log.Printf("  libp2p listening: %s/p2p/%s", addr, h.ID())
 	}
+
+	// Periodically reconcile peer topology so stale/disconnected peers recover
+	// after VM IP changes or one-sided restarts.
+	node.startPeerMaintenanceLoop(60 * time.Second)
 
 	return node, nil
 }
@@ -185,13 +193,33 @@ func (n *Node) PeerByPeerID(id peer.ID) *PeerMeta {
 func (n *Node) PeerByHospitalID(hospitalID string) *PeerMeta {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
+
+	var bestConnected *PeerMeta
+	var bestAny *PeerMeta
+
 	for _, pm := range n.peers {
-		if pm.HospitalID == hospitalID {
+		if pm.HospitalID != hospitalID {
+			continue
+		}
+
+		if bestAny == nil || pm.LastSeen.After(bestAny.LastSeen) {
 			cp := *pm
-			return &cp
+			bestAny = &cp
+		}
+
+		if n.Host.Network().Connectedness(pm.PeerID) == network.Connected {
+			if bestConnected == nil || pm.LastSeen.After(bestConnected.LastSeen) {
+				cp := *pm
+				bestConnected = &cp
+			}
 		}
 	}
-	return nil
+
+	if bestConnected != nil {
+		return bestConnected
+	}
+
+	return bestAny
 }
 
 // addOrUpdatePeer stores or updates a discovered peer.
@@ -209,6 +237,26 @@ func (n *Node) addOrUpdatePeer(id peer.ID, meta *PeerMeta) {
 			meta.Addresses = existing.Addresses
 		}
 	}
+
+	// A hospital should resolve to a single active peer identity.
+	// If the hospital was redeployed and got a new peer ID, drop stale IDs
+	// so hospital-id based routing does not randomly pick an old identity.
+	if meta.HospitalID != "" && !strings.EqualFold(meta.HospitalID, "unknown") {
+		for otherID, otherMeta := range n.peers {
+			if otherID == id || otherMeta == nil {
+				continue
+			}
+			if !strings.EqualFold(otherMeta.HospitalID, meta.HospitalID) {
+				continue
+			}
+
+			delete(n.peers, otherID)
+			n.Host.Peerstore().ClearAddrs(otherID)
+			log.Printf("peer-cache: replaced stale peer ID %s for hospital %s (new %s)",
+				otherID.String()[:16], meta.HospitalID, id.String()[:16])
+		}
+	}
+
 	n.peers[id] = meta
 }
 
@@ -254,6 +302,89 @@ func (n *Node) ConnectToPeer(ctx context.Context, multiaddrs []string) (peer.ID,
 	}()
 
 	return peerID, nil
+}
+
+// startPeerMaintenanceLoop periodically reconciles known peers.
+// It refreshes peer exchange with connected peers and attempts reconnect
+// for disconnected peers using all known addresses.
+func (n *Node) startPeerMaintenanceLoop(interval time.Duration) {
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-ticker.C:
+				n.peerMaintenanceTick()
+			}
+		}
+	}()
+}
+
+func (n *Node) peerMaintenanceTick() {
+	for _, pm := range n.Peers() {
+		if pm.PeerID == "" || pm.PeerID == n.Host.ID() {
+			continue
+		}
+
+		if n.Host.Network().Connectedness(pm.PeerID) == network.Connected {
+			exCtx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+			n.RequestPeerExchange(exCtx, pm.PeerID)
+			cancel()
+			continue
+		}
+
+		multiaddrs := n.candidateMultiaddrs(pm.PeerID, pm.Addresses)
+		if len(multiaddrs) == 0 {
+			continue
+		}
+
+		connCtx, cancel := context.WithTimeout(n.ctx, 12*time.Second)
+		_, err := n.ConnectToPeer(connCtx, multiaddrs)
+		cancel()
+		if err != nil {
+			label := pm.HospitalID
+			if label == "" {
+				label = "unknown"
+			}
+			log.Printf("peer-maint: reconnect to %s (%s) failed: %v", label, pm.PeerID.String()[:16], err)
+			continue
+		}
+
+		label := pm.HospitalID
+		if label == "" {
+			label = "unknown"
+		}
+		log.Printf("✓ peer-maint: reconnected to %s (%s)", label, pm.PeerID.String()[:16])
+	}
+}
+
+func (n *Node) candidateMultiaddrs(peerID peer.ID, preferred []ma.Multiaddr) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+
+	add := func(a ma.Multiaddr) {
+		full := fmt.Sprintf("%s/p2p/%s", a.String(), peerID.String())
+		if _, ok := seen[full]; ok {
+			return
+		}
+		seen[full] = struct{}{}
+		out = append(out, full)
+	}
+
+	for _, a := range preferred {
+		add(a)
+	}
+	for _, a := range n.Host.Peerstore().Addrs(peerID) {
+		add(a)
+	}
+
+	return out
 }
 
 // ── Persistent identity key ──

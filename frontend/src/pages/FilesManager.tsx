@@ -20,6 +20,10 @@ import {
 /* ── Types ─────────────────────────────────────────────────── */
 type Tab = 'all' | 'shared' | 'upload'
 
+type CombinedEntry =
+  | { kind: 'uploaded'; data: FileInfo }
+  | { kind: 'shared'; data: TransferStatus }
+
 interface UploadItem {
   id: string
   file: File
@@ -365,6 +369,36 @@ export function FilesManager() {
     return true
   })
 
+  /* ── Shared files filtered by search (used in All Files tab) ─────── */
+  // Exclude completed transfers: once a transfer is completed the file is stored
+  // locally and already appears in `filtered` via listFiles(). Including it here
+  // too causes a double entry. Only pending/in_progress/failed transfers are not
+  // yet in the local file store, so those are the ones worth showing separately.
+  const filteredShared = sharedFiles.filter((t) =>
+    t.status !== 'completed' &&
+    (
+      !search ||
+      t.original_filename.toLowerCase().includes(search.toLowerCase()) ||
+      (t.source_hospital_name ?? '').toLowerCase().includes(search.toLowerCase())
+    )
+  )
+
+  /* ── Combined list for "All Files" tab (uploaded + received) ─────── */
+  const combinedAll: CombinedEntry[] = [
+    ...filtered.map((f): CombinedEntry => ({ kind: 'uploaded', data: f })),
+    ...filteredShared.map((t): CombinedEntry => ({ kind: 'shared', data: t })),
+  ].sort((a, b) => {
+    const tsA =
+      a.kind === 'uploaded'
+        ? new Date(a.data.upload_timestamp).getTime()
+        : new Date(a.data.completed_at ?? a.data.initiated_at ?? 0).getTime()
+    const tsB =
+      b.kind === 'uploaded'
+        ? new Date(b.data.upload_timestamp).getTime()
+        : new Date(b.data.completed_at ?? b.data.initiated_at ?? 0).getTime()
+    return tsB - tsA // newest first
+  })
+
   const clearFilters = () => {
     setFilterContentType(''); setFilterSizeMin(''); setFilterSizeMax('')
     setFilterDateFrom(''); setFilterDateTo(''); setSearch('')
@@ -527,11 +561,11 @@ export function FilesManager() {
             )}
 
             <div style={css.card}>
-              {loading ? (
+              {loading || sharedLoading ? (
                 <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--muted)' }}>
                   Loading files…
                 </div>
-              ) : filtered.length === 0 ? (
+              ) : combinedAll.length === 0 ? (
                 <div style={{ padding: '3rem', textAlign: 'center', color: 'var(--muted)' }}>
                   {search ? 'No files match your search.' : 'No files yet. Switch to the Upload tab to add files.'}
                 </div>
@@ -546,7 +580,7 @@ export function FilesManager() {
                         Size
                       </th>
                       <th style={{ padding: '0.7rem 1rem', fontWeight: 600, fontSize: 13, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px' }}>
-                        Uploaded
+                        Date
                       </th>
                       <th style={{ padding: '0.7rem 1rem', fontWeight: 600, fontSize: 13, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px', width: 150 }}>
                         Actions
@@ -554,78 +588,134 @@ export function FilesManager() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map((f) => (
-                      <tr
-                        key={f.id}
-                        onClick={() => openDetail(f)}
-                        style={{
-                          borderBottom: '1px solid var(--border)',
-                          cursor: 'pointer',
-                          background: detailFile?.id === f.id ? 'rgba(var(--accent-rgb, 59,130,246), .06)' : undefined,
-                          transition: 'background .1s',
-                        }}
-                        onMouseEnter={(e) => {
-                          if (detailFile?.id !== f.id) (e.currentTarget.style.background = 'rgba(128,128,128,.06)')
-                        }}
-                        onMouseLeave={(e) => {
-                          if (detailFile?.id !== f.id) (e.currentTarget.style.background = '')
-                        }}
-                      >
-                        <td style={{ padding: '0.65rem 1rem' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 18 }}>
-                              {isDicom(f.filename, f.content_type) ? '🩺' : '📄'}
-                            </span>
-                            <div>
-                              <div style={{ fontWeight: 500, fontSize: 14 }}>{f.filename}</div>
-                              {f.description && (
-                                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
-                                  {f.description}
+                    {combinedAll.map((entry) => {
+                      if (entry.kind === 'uploaded') {
+                        const f = entry.data
+                        return (
+                          <tr
+                            key={`u-${f.id}`}
+                            onClick={() => openDetail(f)}
+                            style={{
+                              borderBottom: '1px solid var(--border)',
+                              cursor: 'pointer',
+                              background: detailFile?.id === f.id ? 'rgba(var(--accent-rgb, 59,130,246), .06)' : undefined,
+                              transition: 'background .1s',
+                            }}
+                            onMouseEnter={(e) => {
+                              if (detailFile?.id !== f.id) (e.currentTarget.style.background = 'rgba(128,128,128,.06)')
+                            }}
+                            onMouseLeave={(e) => {
+                              if (detailFile?.id !== f.id) (e.currentTarget.style.background = '')
+                            }}
+                          >
+                            <td style={{ padding: '0.65rem 1rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 18 }}>
+                                  {isDicom(f.filename, f.content_type) ? '🩺' : '📄'}
+                                </span>
+                                <div>
+                                  <div style={{ fontWeight: 500, fontSize: 14 }}>{f.filename}</div>
+                                  {f.description && (
+                                    <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+                                      {f.description}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 14 }}>
-                          {fmtSize(f.size)}
-                        </td>
-                        <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 13 }}>
-                          {new Date(f.upload_timestamp).toLocaleDateString()}{' '}
-                          <span style={{ opacity: 0.6 }}>
-                            {new Date(f.upload_timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        </td>
-                        <td style={{ padding: '0.65rem 1rem' }} onClick={(e) => e.stopPropagation()}>
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            <button
-                              title="Share to hospital"
-                              onClick={() => openShareDialog(f)}
-                              style={{ ...css.btn('primary'), padding: '0.3rem 0.6rem' }}
-                            >
-                              ⇄
-                            </button>
-                            <button
-                              title="Download"
-                              onClick={() => downloadFile(f.id, f.filename).catch((e) => setError(e.message))}
-                              style={{ ...css.btn('ghost'), padding: '0.3rem 0.6rem' }}
-                            >
-                              ↓
-                            </button>
-                            <button
-                              title="Delete"
-                              onClick={() => onDelete(f.id, f.filename)}
-                              style={{ ...css.btn('danger'), padding: '0.3rem 0.6rem' }}
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                              </div>
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 14 }}>
+                              {fmtSize(f.size)}
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 13 }}>
+                              {new Date(f.upload_timestamp).toLocaleDateString()}{' '}
+                              <span style={{ opacity: 0.6 }}>
+                                {new Date(f.upload_timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem' }} onClick={(e) => e.stopPropagation()}>
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                <button
+                                  title="Share to hospital"
+                                  onClick={() => openShareDialog(f)}
+                                  style={{ ...css.btn('primary'), padding: '0.3rem 0.6rem' }}
+                                >
+                                  ⇄
+                                </button>
+                                <button
+                                  title="Download"
+                                  onClick={() => downloadFile(f.id, f.filename).catch((e) => setError(e.message))}
+                                  style={{ ...css.btn('ghost'), padding: '0.3rem 0.6rem' }}
+                                >
+                                  ↓
+                                </button>
+                                <button
+                                  title="Delete"
+                                  onClick={() => onDelete(f.id, f.filename)}
+                                  style={{ ...css.btn('danger'), padding: '0.3rem 0.6rem' }}
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      } else {
+                        const t = entry.data
+                        const date = t.completed_at ?? t.initiated_at
+                        return (
+                          <tr
+                            key={`s-${t.transfer_id}`}
+                            style={{ borderBottom: '1px solid var(--border)', transition: 'background .1s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(128,128,128,.06)' }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = '' }}
+                          >
+                            <td style={{ padding: '0.65rem 1rem' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 18 }}>
+                                  {isDicom(t.original_filename, null) ? '🩺' : '📄'}
+                                </span>
+                                <div>
+                                  <div style={{ fontWeight: 500, fontSize: 14 }}>{t.original_filename}</div>
+                                  <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 2, fontWeight: 500 }}>
+                                    Shared from {t.source_hospital_name || t.source_hospital_id}
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 14 }}>
+                              {t.file_size ? fmtSize(t.file_size) : '—'}
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem', color: 'var(--muted)', fontSize: 13 }}>
+                              {date ? (
+                                <>
+                                  {new Date(date).toLocaleDateString()}{' '}
+                                  <span style={{ opacity: 0.6 }}>
+                                    {new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </>
+                              ) : '—'}
+                            </td>
+                            <td style={{ padding: '0.65rem 1rem' }}>
+                              <span style={{
+                                display: 'inline-block',
+                                padding: '2px 8px',
+                                borderRadius: 6,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                background: t.status === 'completed' ? 'rgba(34,197,94,.1)' : t.status === 'failed' ? 'rgba(239,68,68,.1)' : 'rgba(245,158,11,.1)',
+                                color: t.status === 'completed' ? '#16a34a' : t.status === 'failed' ? '#dc2626' : '#d97706',
+                              }}>
+                                {t.status}
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      }
+                    })}
                   </tbody>
                 </table>
               )}
-              {!loading && (
+              {!loading && !sharedLoading && (
                 <div
                   style={{
                     padding: '0.6rem 1rem',
@@ -637,11 +727,12 @@ export function FilesManager() {
                   }}
                 >
                   <span>
-                    {filtered.length} file{filtered.length !== 1 ? 's' : ''}
+                    {combinedAll.length} file{combinedAll.length !== 1 ? 's' : ''}
+                    {filtered.length > 0 && filteredShared.length > 0 && ` (${filtered.length} uploaded, ${filteredShared.length} shared)`}
                     {search && ` matching "${search}"`}
                   </span>
                   <span>
-                    Total: {fmtSize(filtered.reduce((a, f) => a + f.size, 0))}
+                    Total: {fmtSize(filtered.reduce((a, f) => a + f.size, 0) + filteredShared.reduce((a, t) => a + (t.file_size ?? 0), 0))}
                   </span>
                 </div>
               )}

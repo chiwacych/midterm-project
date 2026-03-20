@@ -173,6 +173,21 @@ multipass transfer "postgres-config/primary-init.sh" "${VM}:${VM_PATH}/postgres-
 multipass transfer "postgres-config/replica-init.sh" "${VM}:${VM_PATH}/postgres-config/" 2>$null
 Write-Host "  ✓ PostgreSQL scripts transferred" -ForegroundColor Green
 
+# Build optional seed-peer env vars for FastAPI auto-discovery.
+# Use stable VM DNS names so hospitals can re-bootstrap after VM restarts.
+$peerConfig = ""
+if ($Peers) {
+  $seedPeers = ($Peers -split ',') |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -ne '' -and $_ -ne $HospitalID } |
+    Select-Object -Unique
+
+  foreach ($peer in $seedPeers) {
+    $peerEnvName = $peer.ToUpper().Replace('-', '_')
+    $peerConfig += "      - FEDERATION_PEER_${peerEnvName}=${peer}.mshome.net:50051`n"
+  }
+}
+
 # Generate docker-compose.yml
 Write-Host "`n🐳 Generating docker-compose.yml..." -ForegroundColor Yellow
 
@@ -338,7 +353,7 @@ services:
 
   # Zookeeper (for Kafka)
   zookeeper:
-    image: confluentinc/cp-zookeeper:latest
+    image: confluentinc/cp-zookeeper:7.0.0
     container_name: zookeeper
     ports:
       - "2181:2181"
@@ -351,7 +366,7 @@ services:
 
   # Kafka Message Queue
   kafka:
-    image: confluentinc/cp-kafka:latest
+    image: confluentinc/cp-kafka:7.0.0
     container_name: kafka
     depends_on:
       - zookeeper
@@ -728,7 +743,32 @@ sudo docker-compose down 2>/dev/null || true
 echo ""
 echo "🔨 Building Docker images..."
 echo "   This may take 10-15 minutes on first run..."
-sudo docker-compose build --pull
+BUILD_OK=0
+for ATTEMPT in 1 2 3; do
+  if [ `$ATTEMPT -gt 1 ]; then
+    echo "   ↻ Build retry `$ATTEMPT/3 (waiting 12s)..."
+    sleep 12
+  fi
+  if sudo docker-compose build --pull; then
+    BUILD_OK=1
+    break
+  fi
+done
+
+# Fallback: use local cache if registry pull is temporarily unavailable
+if [ `$BUILD_OK -ne 1 ]; then
+  echo "   ⚠ Build with --pull failed, retrying without --pull..."
+  if sudo docker-compose build; then
+    BUILD_OK=1
+  fi
+fi
+
+# Ensure required custom images exist before starting services.
+if [ `$BUILD_OK -ne 1 ] || ! sudo docker image inspect medimage-federation:latest >/dev/null 2>&1 || ! sudo docker image inspect medimage-fastapi:latest >/dev/null 2>&1; then
+  echo "❌ Docker image build failed (federation/fastapi images unavailable)."
+  echo "   This is usually a transient Docker Hub connectivity issue."
+  exit 1
+fi
 
 # Start services
 echo ""
@@ -803,11 +843,27 @@ if [ -f peers.conf ]; then
                         RESULT=`$(curl -sf -X POST "http://localhost:8000/api/federation/peers/add" \
                             -H "Content-Type: application/json" \
                             -d "[\"`$MULTIADDR\"]" 2>/dev/null || true)
-                        if echo "`$RESULT" | grep -q '"success":true'; then
+                      ADD_OK=`$(echo "`$RESULT" | python3 -c "import sys,json
+          try:
+            d=json.load(sys.stdin)
+            print('1' if d.get('success') else '0')
+          except Exception:
+            print('0')" 2>/dev/null)
+                      if [ "`$ADD_OK" = "1" ]; then
                             echo "  ✓ Connected to `$PEER_ID via libp2p"
                             BOOTSTRAP_SUCCESS=1
                         else
-                            echo "  ⚠ libp2p connect to `$PEER_ID failed: `$RESULT"
+                        ADD_MSG=`$(echo "`$RESULT" | python3 -c "import sys,json
+          try:
+            d=json.load(sys.stdin)
+            print(d.get('message',''))
+          except Exception:
+            print('')" 2>/dev/null)
+                        if [ -n "`$ADD_MSG" ]; then
+                          echo "  ⚠ libp2p connect to `$PEER_ID failed: `$ADD_MSG"
+                        else
+                          echo "  ⚠ libp2p connect to `$PEER_ID failed: `$RESULT"
+                        fi
                         fi
                     else
                         echo "  ⚠ No peer_id from `$PEER_ID"

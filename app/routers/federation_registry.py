@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from datetime import datetime
+import json
 import os
 import asyncio
 import httpx
@@ -349,21 +350,24 @@ async def receive_announcement(
 def _get_peer_api_endpoints() -> List[str]:
     """
     Gather API base URLs for every known peer.
-    Sources: FEDERATION_PEER_* env vars  +  registry entries.
-    Returns de-duplicated list like ["http://172.29.x.x", ...].
+    Sources (in priority order):
+      1. FEDERATION_PEER_* env vars
+      2. local registry entries
+      3. persisted peer-seeds.json (fallback when registry hasn't synced yet)
+    Returns de-duplicated list like ["http://172.29.x.x:8000", ...].
     """
     endpoints: Dict[str, str] = {}  # hospital_id -> api_url
     my_id = os.getenv("HOSPITAL_ID", "")
-    
-    # 1) From env vars  (FEDERATION_PEER_HOSPITAL_B=hospital-b.local:50051)
     api_port = os.getenv("API_PORT", "8000")
+
+    # 1) From env vars  (FEDERATION_PEER_HOSPITAL_B=hospital-b.local:50051)
     for key, value in os.environ.items():
         if key.startswith("FEDERATION_PEER_"):
             host = value.split(":")[0]
             peer_id = key.replace("FEDERATION_PEER_", "").lower().replace("_", "-")
             if peer_id != my_id:
                 endpoints[peer_id] = f"http://{host}:{api_port}"
-    
+
     # 2) From local registry (may already have metadata with api_endpoint)
     try:
         registry = get_registry()
@@ -372,7 +376,24 @@ def _get_peer_api_endpoints() -> List[str]:
                 endpoints[hid] = meta.api_endpoint
     except Exception:
         pass
-    
+
+    # 3) From persisted seed file — ensures announce/pull work even when the
+    #    registry is empty on a first-run or after a clean restart where the
+    #    registry JSON hasn't been written yet.
+    try:
+        seed_file = os.getenv("PEER_SEED_FILE", "data/peer-seeds.json")
+        with open(seed_file, "r", encoding="utf-8") as f:
+            seeds = json.load(f)
+        if isinstance(seeds, dict):
+            for hid, item in seeds.items():
+                if hid == my_id or hid in endpoints:
+                    continue
+                api_ep = (item.get("api_endpoint") or "").strip()
+                if api_ep:
+                    endpoints[hid] = api_ep
+    except Exception:
+        pass
+
     return list(endpoints.values())
 
 
