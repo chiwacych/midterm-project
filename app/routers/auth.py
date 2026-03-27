@@ -1,6 +1,6 @@
 """Auth endpoints: signup, login, refresh, me, setup-password, seed."""
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -165,7 +165,7 @@ def setup_password(body: SetupPasswordRequest, db: Session = Depends(get_db)):
     ).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invitation token")
-    if user.invitation_expires_at and user.invitation_expires_at < datetime.datetime.now(datetime.timezone.utc):
+    if user.invitation_expires_at and user.invitation_expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invitation token has expired")
     user.hashed_password = hash_password(body.password)
     user.invitation_token = None
