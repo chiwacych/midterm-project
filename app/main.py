@@ -2152,10 +2152,11 @@ async def delete_file_version(
 def _accessible_dicom_files_query(db: Session, current_user: User):
     query = db.query(FileMetadata).filter(FileMetadata.is_deleted == False)
     if current_user.role == "patient":
-        if current_user.patient_id:
-            query = query.filter(FileMetadata.patient_id == current_user.patient_id)
+        resolved_patient_id = _resolve_patient_id_for_user(db, current_user)
+        if not resolved_patient_id:
+            query = query.filter(False)
         else:
-            query = query.filter(FileMetadata.user_id == str(current_user.id))
+            query = query.filter(FileMetadata.patient_id == resolved_patient_id)
     return query.filter(
         or_(
             FileMetadata.dicom_study_id.isnot(None),
