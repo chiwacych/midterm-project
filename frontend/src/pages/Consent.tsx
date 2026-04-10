@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import {
   listConsents,
@@ -49,6 +50,8 @@ const badgeStyle = (color: string): React.CSSProperties => ({
 
 export function Consent() {
   const { user } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('files')
   const [error, setError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
@@ -66,6 +69,7 @@ export function Consent() {
   const [loadingPending, setLoadingPending] = useState(false)
   const [processingId, setProcessingId] = useState<number | null>(null)
   const [approveDays, setApproveDays] = useState<Record<number, number>>({})
+  const [focusedRequestId, setFocusedRequestId] = useState<number | null>(null)
 
   // Consents
   const [consents, setConsents] = useState<ConsentItem[]>([])
@@ -79,6 +83,32 @@ export function Consent() {
 
   const unreadCount = notifications.filter(n => !n.read).length
   const pendingCount = pending.length
+  const patientFileById = useMemo(
+    () => new Map(files.map(file => [file.id, file])),
+    [files],
+  )
+
+  const parseRequestIdFromLink = (link: string | null): number | null => {
+    if (!link) return null
+    try {
+      const url = new URL(link, window.location.origin)
+      const raw = url.searchParams.get('request_id') || url.searchParams.get('requestId')
+      if (!raw) return null
+      const parsed = parseInt(raw, 10)
+      return Number.isNaN(parsed) ? null : parsed
+    } catch {
+      return null
+    }
+  }
+
+  const scrollToPendingRequest = (requestId: number) => {
+    window.setTimeout(() => {
+      const el = document.getElementById(`pending-request-${requestId}`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    }, 80)
+  }
 
   // ---- Loaders ----
   const loadFiles = async () => {
@@ -121,6 +151,35 @@ export function Consent() {
 
   useEffect(() => { if (user?.role === 'patient') loadNotifications() }, [unreadOnly])
 
+  useEffect(() => {
+    if (user?.role !== 'patient') return
+    const params = new URLSearchParams(location.search)
+    const rawRequestId = params.get('request_id')
+    if (!rawRequestId) return
+
+    const requestId = parseInt(rawRequestId, 10)
+    if (Number.isNaN(requestId)) return
+
+    setTab('pending')
+    setFocusedRequestId(requestId)
+    loadPending().finally(() => scrollToPendingRequest(requestId))
+
+    params.delete('request_id')
+    navigate(
+      {
+        pathname: location.pathname,
+        search: params.toString() ? `?${params.toString()}` : '',
+      },
+      { replace: true },
+    )
+  }, [location.pathname, location.search, navigate, user])
+
+  useEffect(() => {
+    if (focusedRequestId && !pending.some(req => req.id === focusedRequestId)) {
+      setFocusedRequestId(null)
+    }
+  }, [focusedRequestId, pending])
+
   // Auto-clear success message
   useEffect(() => {
     if (successMsg) { const t = setTimeout(() => setSuccessMsg(null), 4000); return () => clearTimeout(t) }
@@ -153,7 +212,7 @@ export function Consent() {
     setError(null)
     try {
       await approveAccessRequest(id, approveDays[id] || 30)
-      setSuccessMsg('Request approved — consent created automatically')
+      setSuccessMsg('Request accepted — consent created automatically')
       loadPending()
       loadConsents()
     } catch (e) { setError(e instanceof Error ? e.message : 'Approval failed') }
@@ -161,13 +220,13 @@ export function Consent() {
   }
 
   const handleDeny = async (id: number) => {
-    if (!window.confirm('Deny this consent request?')) return
+    if (!window.confirm('Reject this consent request?')) return
     setProcessingId(id)
     try {
       await denyAccessRequest(id)
-      setSuccessMsg('Request denied')
+      setSuccessMsg('Request rejected')
       loadPending()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Deny failed') }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Reject failed') }
     finally { setProcessingId(null) }
   }
 
@@ -185,6 +244,31 @@ export function Consent() {
 
   const handleNotifRead = async (id: number) => {
     try { await markNotificationRead(id); loadNotifications() } catch { /* ignore */ }
+  }
+
+  const handleOpenNotificationRequest = async (notif: ConsentNotification) => {
+    const requestId = parseRequestIdFromLink(notif.link)
+
+    if (!notif.read) {
+      try {
+        await markNotificationRead(notif.id)
+      } catch {
+        // best effort only
+      }
+    }
+
+    await loadFiles()
+    await loadPending()
+    await loadNotifications()
+
+    setTab('pending')
+    if (requestId) {
+      setFocusedRequestId(requestId)
+      scrollToPendingRequest(requestId)
+      setSuccessMsg('Review the request and choose Accept or Reject.')
+    } else {
+      setSuccessMsg('Opened pending requests for your review.')
+    }
   }
 
   // ---- Non-patient view ----
@@ -328,8 +412,14 @@ export function Consent() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              {pending.map(req => (
-                <div key={req.id} style={{ ...cardStyle, borderLeftWidth: 4, borderLeftColor: req.urgency === 'urgent' ? '#f59e0b' : req.urgency === 'emergency' ? '#ef4444' : 'var(--accent)' }}>
+              {pending.map(req => {
+                const requestFileIds = req.file_ids && req.file_ids.length > 0
+                  ? req.file_ids
+                  : (req.file_id ? [req.file_id] : [])
+                const isFocused = focusedRequestId === req.id
+
+                return (
+                <div id={`pending-request-${req.id}`} key={req.id} style={{ ...cardStyle, borderLeftWidth: 4, borderLeftColor: req.urgency === 'urgent' ? '#f59e0b' : req.urgency === 'emergency' ? '#ef4444' : 'var(--accent)', background: isFocused ? 'rgba(59,130,246,0.08)' : 'var(--surface)', boxShadow: isFocused ? '0 0 0 1px rgba(59,130,246,0.35)' : 'none' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                     <div>
                       <strong>{req.requester_name || req.requester_email}</strong>
@@ -349,9 +439,22 @@ export function Consent() {
                     <strong>Reason:</strong> {req.reason}
                   </div>
 
-                  {req.file_ids && req.file_ids.length > 0 && (
-                    <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: '0.75rem' }}>
-                      Requested files: {req.file_ids.join(', ')}
+                  {requestFileIds.length > 0 && (
+                    <div style={{ marginBottom: '0.75rem' }}>
+                      <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 6 }}>
+                        Requested files:
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {requestFileIds.map(fileId => {
+                          const file = patientFileById.get(fileId)
+                          return (
+                            <div key={`${req.id}-${fileId}`} style={{ fontSize: 13, color: 'var(--text)' }}>
+                              <strong>#{fileId}</strong>
+                              {' '}· {file ? (file.original_filename || file.filename) : `File ID ${fileId}`}
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -372,14 +475,14 @@ export function Consent() {
                       <option value={365}>1 year</option>
                     </select>
                     <button onClick={() => handleApprove(req.id)} disabled={processingId === req.id} style={{ padding: '0.4rem 1rem', background: processingId === req.id ? 'var(--muted)' : 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.3)', borderRadius: 6, cursor: processingId === req.id ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: 13 }}>
-                      {processingId === req.id ? 'Processing...' : 'Approve'}
+                      {processingId === req.id ? 'Processing...' : 'Accept'}
                     </button>
                     <button onClick={() => handleDeny(req.id)} disabled={processingId === req.id} style={{ padding: '0.4rem 1rem', background: 'rgba(239,68,68,0.1)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 6, cursor: processingId === req.id ? 'not-allowed' : 'pointer', fontWeight: 500, fontSize: 13 }}>
-                      Deny
+                      Reject
                     </button>
                   </div>
                 </div>
-              ))}
+              )})}
             </div>
           )}
         </div>
@@ -462,6 +565,7 @@ export function Consent() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               {notifications.map(n => {
                 const typeColor = n.type === 'warning' ? '#f59e0b' : n.type === 'consent_request' ? '#3b82f6' : n.type === 'success' ? '#10b981' : '#6b7280'
+                const canReviewRequest = n.type === 'consent_request'
                 return (
                   <div key={n.id} style={{ ...cardStyle, opacity: n.read ? 0.7 : 1, borderLeftWidth: n.read ? 1 : 4, borderLeftColor: n.read ? 'var(--border)' : typeColor }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
@@ -475,11 +579,18 @@ export function Consent() {
                           {new Date(n.created_at).toLocaleString()}
                         </div>
                       </div>
-                      {!n.read && (
-                        <button onClick={() => handleNotifRead(n.id)} style={{ padding: '0.3rem 0.5rem', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--surface)', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}>
-                          Mark read
-                        </button>
-                      )}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end' }}>
+                        {canReviewRequest && (
+                          <button onClick={() => handleOpenNotificationRequest(n)} style={{ padding: '0.3rem 0.5rem', border: '1px solid rgba(59,130,246,0.35)', borderRadius: 4, background: 'rgba(59,130,246,0.1)', color: '#3b82f6', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap', fontWeight: 600 }}>
+                            Review request
+                          </button>
+                        )}
+                        {!n.read && (
+                          <button onClick={() => handleNotifRead(n.id)} style={{ padding: '0.3rem 0.5rem', border: '1px solid var(--border)', borderRadius: 4, background: 'var(--surface)', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}>
+                            Mark read
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )

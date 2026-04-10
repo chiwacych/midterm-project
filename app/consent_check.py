@@ -3,7 +3,26 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from models import Consent, FileMetadata
+from models import Consent, FileMetadata, User, Patient
+
+
+def _resolve_patient_for_user(db: Session, user: User) -> Patient | None:
+    """Resolve patient record for patient users using link-first fallback matching."""
+    if user.patient_id:
+        linked_patient = db.query(Patient).filter(Patient.id == user.patient_id).first()
+        if linked_patient:
+            return linked_patient
+
+    match_filters = []
+    if user.email:
+        match_filters.append(Patient.email == user.email)
+    if user.phone:
+        match_filters.append(Patient.phone == user.phone)
+
+    if not match_filters:
+        return None
+
+    return db.query(Patient).filter(or_(*match_filters)).first()
 
 
 def can_access_file(
@@ -38,14 +57,27 @@ def can_access_file(
     if requester_role == "admin":
         return True
 
+    file_meta = db.query(FileMetadata).filter(FileMetadata.id == file_id).first()
+    if not file_meta:
+        return False
+
+    patient_id = file_meta.patient_id if file_meta else None
+
+    # Patients may only access files that belong to their own patient record.
+    if requester_role == "patient":
+        requester = db.query(User).filter(User.id == requester_user_id).first()
+        if not requester:
+            return False
+
+        requester_patient = _resolve_patient_for_user(db, requester)
+        return bool(requester_patient and patient_id and requester_patient.id == patient_id)
+
     if owner_id_int is None:
         return False
 
     now = datetime.utcnow()
 
     # Check consents: both user_id-based (owner granted) and patient_id-based
-    file_meta = db.query(FileMetadata).filter(FileMetadata.id == file_id).first()
-    patient_id = file_meta.patient_id if file_meta else None
 
     # Build base consent query — active, non-revoked, non-expired
     base_filter = [
@@ -97,5 +129,4 @@ def can_access_file(
         if c.scope == "all" and c.granted_to_role == requester_role:
             return True
 
-    return False
     return False
