@@ -1,6 +1,8 @@
 """User profile management API: get/update profile, change password, preferences."""
 from typing import Optional
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import os
+import random
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -11,6 +13,10 @@ from models import User
 from auth import get_current_user, hash_password, verify_password
 
 router = APIRouter(prefix="/api/profile", tags=["profile"])
+
+
+TWO_FACTOR_CHALLENGE_TTL_SECONDS = 300
+_two_factor_challenges: dict[int, tuple[str, datetime]] = {}
 
 
 class EmergencyContact(BaseModel):
@@ -88,6 +94,18 @@ class UpdatePreferencesRequest(BaseModel):
     notifications_email: Optional[bool] = None
     notifications_sms: Optional[bool] = None
     notifications_push: Optional[bool] = None
+
+
+class TwoFactorChallengeResponse(BaseModel):
+    status: str
+    message: str
+    expires_in: int
+    otp_hint: Optional[str] = None
+
+
+class VerifyTwoFactorRequest(BaseModel):
+    code: str
+    enable: bool
 
 
 @router.get("", response_model=UserProfileResponse)
@@ -255,4 +273,58 @@ def toggle_two_factor(
         "status": "success",
         "two_factor_enabled": current_user.two_factor_enabled,
         "message": f"Two-factor authentication {'enabled' if current_user.two_factor_enabled else 'disabled'}"
+    }
+
+
+@router.post("/2fa/challenge", response_model=TwoFactorChallengeResponse)
+def create_two_factor_challenge(
+    current_user: User = Depends(get_current_user),
+):
+    """Create a short-lived OTP challenge for enabling/disabling 2FA."""
+    # Opportunistically clean up expired challenges.
+    now = datetime.utcnow()
+    expired_users = [uid for uid, (_, expires_at) in _two_factor_challenges.items() if expires_at <= now]
+    for uid in expired_users:
+        _two_factor_challenges.pop(uid, None)
+
+    otp_code = f"{random.randint(0, 999999):06d}"
+    expires_at = now + timedelta(seconds=TWO_FACTOR_CHALLENGE_TTL_SECONDS)
+    _two_factor_challenges[current_user.id] = (otp_code, expires_at)
+
+    include_hint = os.getenv("ENV", "development").lower() != "production"
+    return TwoFactorChallengeResponse(
+        status="success",
+        message="OTP challenge generated",
+        expires_in=TWO_FACTOR_CHALLENGE_TTL_SECONDS,
+        otp_hint=otp_code if include_hint else None,
+    )
+
+
+@router.post("/2fa/verify")
+def verify_two_factor(
+    body: VerifyTwoFactorRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verify OTP challenge and apply requested 2FA state."""
+    challenge = _two_factor_challenges.get(current_user.id)
+    if not challenge:
+        raise HTTPException(status_code=400, detail="No active OTP challenge. Request a new code.")
+
+    expected_code, expires_at = challenge
+    if datetime.utcnow() > expires_at:
+        _two_factor_challenges.pop(current_user.id, None)
+        raise HTTPException(status_code=400, detail="OTP challenge expired. Request a new code.")
+
+    if body.code.strip() != expected_code:
+        raise HTTPException(status_code=400, detail="Invalid OTP code")
+
+    current_user.two_factor_enabled = body.enable
+    db.commit()
+    _two_factor_challenges.pop(current_user.id, None)
+
+    return {
+        "status": "success",
+        "two_factor_enabled": current_user.two_factor_enabled,
+        "message": f"Two-factor authentication {'enabled' if current_user.two_factor_enabled else 'disabled'}",
     }

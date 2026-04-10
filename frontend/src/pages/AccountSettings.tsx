@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import {
   getProfile,
   updateProfile,
   changePassword,
-  toggle2FA,
   UserProfile as ApiUserProfile,
   getComplianceReport,
   getAccessSummary,
@@ -145,6 +145,7 @@ const statColor: Record<string, string> = { success: '#10b981', failure: '#ef444
 type Tab = 'profile' | 'security' | 'compliance' | 'audit'
 
 export function AccountSettings() {
+  const navigate = useNavigate()
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
   const isStaff = user?.role === 'doctor' || user?.role === 'admin'
@@ -247,14 +248,6 @@ export function AccountSettings() {
       setProfile(p => p ? { ...p, security: { ...p.security, lastPasswordChange: new Date().toISOString() } } : null)
       setSuccessMsg('Password changed')
     } catch (e) { setErrorMsg(e instanceof Error ? e.message : 'Password change failed') }
-  }
-
-  const handleToggle2FA = async () => {
-    try {
-      const r = await toggle2FA()
-      setProfile(p => p ? { ...p, security: { ...p.security, twoFactorEnabled: r.two_factor_enabled } } : null)
-      setSuccessMsg(`2FA ${r.two_factor_enabled ? 'enabled' : 'disabled'}`)
-    } catch (e) { setErrorMsg(e instanceof Error ? e.message : '2FA toggle failed') }
   }
 
   // ── Filtered audit rows ──
@@ -489,8 +482,8 @@ export function AccountSettings() {
                   </span>
                 </div>
               </div>
-              <button onClick={handleToggle2FA} style={{ padding: '0.4rem 1rem', background: profile.security.twoFactorEnabled ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', color: profile.security.twoFactorEnabled ? '#ef4444' : '#10b981', border: `1px solid ${profile.security.twoFactorEnabled ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`, borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>
-                {profile.security.twoFactorEnabled ? 'Disable' : 'Enable'}
+              <button onClick={() => navigate('/settings/2fa')} style={{ padding: '0.4rem 1rem', background: profile.security.twoFactorEnabled ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)', color: profile.security.twoFactorEnabled ? '#ef4444' : '#10b981', border: `1px solid ${profile.security.twoFactorEnabled ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`, borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>
+                Configure via OTP
               </button>
             </div>
           </div>

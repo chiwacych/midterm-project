@@ -1,4 +1,5 @@
-from sqlalchemy import create_engine, event
+import sqlalchemy
+from sqlalchemy import create_engine, event, text as sa_text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 import os
@@ -60,11 +61,31 @@ else:
     replica_session_makers = None
 
 
+def _apply_migrations(conn) -> None:
+    """Add columns introduced after initial schema creation. Safe to run repeatedly."""
+    migrations = [
+        # DICOM per-instance identifiers added for OHIF WADO lookup and slice ordering
+        "ALTER TABLE file_metadata ADD COLUMN IF NOT EXISTS dicom_instance_uid VARCHAR(100)",
+        "ALTER TABLE file_metadata ADD COLUMN IF NOT EXISTS dicom_instance_number INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_file_metadata_dicom_instance_uid ON file_metadata (dicom_instance_uid)",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sa_text(sql))
+        except Exception as exc:
+            print(f"Migration skipped ({sql!r}): {exc}")
+    conn.commit()
+
+
 def init_db():
     """Initialize database - create all tables"""
     Base.metadata.create_all(bind=engine)
     print("Database tables created successfully on primary!")
-    
+
+    with engine.connect() as conn:
+        _apply_migrations(conn)
+    print("Schema migrations applied.")
+
     # Wait for replication to catch up
     if replica_engines:
         import time
