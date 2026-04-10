@@ -7,7 +7,7 @@ Patient-facing endpoints:
   - GET /api/consent: List all consents (patients see own, admins see all)
   - GET /api/consent/my-notifications: Patient notifications
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -76,11 +76,30 @@ class NotificationResponse(BaseModel):
     created_at: str
 
 
+def _resolve_patient_for_user(db: Session, user: User) -> Optional[Patient]:
+    """Resolve patient record for a patient user using link-first fallback matching."""
+    if user.patient_id:
+        linked_patient = db.query(Patient).filter(Patient.id == user.patient_id).first()
+        if linked_patient:
+            return linked_patient
+
+    match_filters = []
+    if user.email:
+        match_filters.append(Patient.email == user.email)
+    if user.phone:
+        match_filters.append(Patient.phone == user.phone)
+
+    if not match_filters:
+        return None
+
+    return db.query(Patient).filter(or_(*match_filters)).first()
+
+
 def _consent_status(c: Consent) -> str:
     """Compute consent status."""
     if c.revoked_at:
         return "revoked"
-    if c.expires_at and c.expires_at < datetime.utcnow():
+    if c.expires_at and c.expires_at < datetime.now(timezone.utc):
         return "expired"
     return "active"
 
@@ -118,9 +137,7 @@ def my_files(
         raise HTTPException(status_code=403, detail="Only patients can view their own files through this endpoint")
 
     # Find patient record linked to user
-    patient = db.query(Patient).filter(
-        or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-    ).first()
+    patient = _resolve_patient_for_user(db, current_user)
 
     if not patient:
         return []
@@ -137,7 +154,7 @@ def my_files(
         consent_count = db.query(Consent).filter(
             Consent.subject_id == f.id,
             Consent.revoked_at.is_(None),
-            or_(Consent.expires_at.is_(None), Consent.expires_at > datetime.utcnow()),
+            or_(Consent.expires_at.is_(None), Consent.expires_at > datetime.now(timezone.utc)),
         ).count()
 
         result.append(PatientFileResponse(
@@ -158,13 +175,18 @@ def my_files(
 
 @router.get("/my-notifications", response_model=List[NotificationResponse])
 def my_notifications(
-    unread_only: bool = Query(False),
+    unread_only: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Get notifications for the current user."""
+    unread_only_flag = False
+    if unread_only is not None:
+        unread_raw = unread_only.strip().lower()
+        unread_only_flag = unread_raw in ("1", "true", "yes", "on")
+
     query = db.query(Notification).filter(Notification.user_id == current_user.id)
-    if unread_only:
+    if unread_only_flag:
         query = query.filter(Notification.read == False)
     notifs = query.order_by(desc(Notification.created_at)).limit(50).all()
     return [
@@ -190,7 +212,7 @@ def mark_notification_read(
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
     notif.read = True
-    notif.read_at = datetime.utcnow()
+    notif.read_at = datetime.now(timezone.utc)
     db.commit()
     return {"status": "ok"}
 
@@ -222,14 +244,12 @@ def grant_consent(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid expires_at format")
     elif body.expires_days:
-        expires = datetime.utcnow() + timedelta(days=body.expires_days)
+        expires = datetime.now(timezone.utc) + timedelta(days=body.expires_days)
 
     # Find patient record for patient users
     patient_id = None
     if current_user.role == "patient":
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if patient:
             patient_id = patient.id
 
@@ -308,15 +328,13 @@ def revoke_consent(
     if c.user_id != current_user.id and current_user.role != "admin":
         # Also allow patient to revoke if it's their patient record
         if current_user.role == "patient":
-            patient = db.query(Patient).filter(
-                or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-            ).first()
+            patient = _resolve_patient_for_user(db, current_user)
             if not patient or c.patient_id != patient.id:
                 raise HTTPException(status_code=403, detail="Not allowed to revoke this consent")
         else:
             raise HTTPException(status_code=403, detail="Not allowed to revoke this consent")
 
-    c.revoked_at = datetime.utcnow()
+    c.revoked_at = datetime.now(timezone.utc)
 
     log_audit_event(
         db=db, event_type="consent.revoked", user_id=current_user.id,
@@ -340,9 +358,7 @@ def list_consents(
 
     if current_user.role == "patient":
         # Patient sees consents they granted + consents for their patient record
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if patient:
             q = q.filter(or_(Consent.user_id == current_user.id, Consent.patient_id == patient.id))
         else:

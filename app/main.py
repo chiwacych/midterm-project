@@ -22,7 +22,7 @@ import pydicom
 from pydicom.uid import ExplicitVRLittleEndian
 
 from database import get_db, init_db, engine, SessionLocal
-from models import FileMetadata, UploadLog, ReplicationStatus, NodeHealth, User
+from models import FileMetadata, UploadLog, ReplicationStatus, NodeHealth, User, Patient
 from minio_client import minio_cluster
 from auth import get_current_user, optional_user, require_roles
 from consent_check import can_access_file
@@ -131,6 +131,26 @@ templates = Jinja2Templates(directory="templates")
 
 # Background task flag
 background_tasks_running = False
+
+
+def _resolve_patient_id_for_user(db: Session, user: User) -> Optional[int]:
+    """Resolve patient ID using explicit user link first, then email/phone fallback."""
+    if user.patient_id:
+        linked_patient = db.query(Patient).filter(Patient.id == user.patient_id).first()
+        if linked_patient:
+            return linked_patient.id
+
+    match_filters = []
+    if user.email:
+        match_filters.append(Patient.email == user.email)
+    if user.phone:
+        match_filters.append(Patient.phone == user.phone)
+
+    if not match_filters:
+        return None
+
+    patient = db.query(Patient).filter(or_(*match_filters)).first()
+    return patient.id if patient else None
 
 
 async def auto_sync_replication():
@@ -1227,10 +1247,18 @@ async def list_files(
     try:
         # RBAC: patients see only their own files (linked via patient_id on User)
         if current_user.role == "patient":
-            if current_user.patient_id:
-                patient_id = current_user.patient_id
-            else:
-                user_id = str(current_user.id)
+            resolved_patient_id = _resolve_patient_id_for_user(db, current_user)
+            if not resolved_patient_id:
+                return {
+                    "status": "success",
+                    "source": "database",
+                    "files": [],
+                    "total": 0,
+                    "page": page or 1,
+                    "page_size": page_size if page is not None else 0,
+                }
+            patient_id = resolved_patient_id
+            user_id = None
         has_advanced_filters = any([
             search,
             content_type,
@@ -1709,14 +1737,15 @@ async def get_dashboard_data(
     try:
         # Role-based dashboard data
         is_patient = current_user.role == "patient"
+        resolved_patient_id = _resolve_patient_id_for_user(db, current_user) if is_patient else None
         
         if is_patient:
             # Patients see only their own file stats
             patient_filter = []
-            if current_user.patient_id:
-                patient_filter.append(FileMetadata.patient_id == current_user.patient_id)
+            if resolved_patient_id:
+                patient_filter.append(FileMetadata.patient_id == resolved_patient_id)
             else:
-                patient_filter.append(FileMetadata.user_id == str(current_user.id))
+                patient_filter.append(False)
             
             total_files = db.query(FileMetadata).filter(
                 FileMetadata.is_deleted == False, *patient_filter
@@ -1743,8 +1772,10 @@ async def get_dashboard_data(
             pending_query = db.query(AccessRequest).filter(
                 AccessRequest.status == "pending"
             )
-            if current_user.patient_id:
-                pending_query = pending_query.filter(AccessRequest.patient_id == current_user.patient_id)
+            if resolved_patient_id:
+                pending_query = pending_query.filter(AccessRequest.patient_id == resolved_patient_id)
+            else:
+                pending_query = pending_query.filter(False)
             pending_access_requests = pending_query.order_by(AccessRequest.requested_at.desc()).limit(5).all()
         else:
             pending_access_requests = db.query(AccessRequest).filter(

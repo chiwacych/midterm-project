@@ -88,6 +88,25 @@ class AccessRequestList(BaseModel):
     page_size: int
 
 
+def _resolve_patient_for_user(db: Session, user: User) -> Optional[Patient]:
+    """Resolve the patient record for a patient user using link-first fallback matching."""
+    if user.patient_id:
+        linked_patient = db.query(Patient).filter(Patient.id == user.patient_id).first()
+        if linked_patient:
+            return linked_patient
+
+    match_filters = []
+    if user.email:
+        match_filters.append(Patient.email == user.email)
+    if user.phone:
+        match_filters.append(Patient.phone == user.phone)
+
+    if not match_filters:
+        return None
+
+    return db.query(Patient).filter(or_(*match_filters)).first()
+
+
 def _parse_file_ids(scope: Optional[str], file_id: Optional[int]) -> List[int]:
     """Extract file IDs from scope string."""
     fids = []
@@ -207,14 +226,19 @@ def create_consent_request(
     db.flush()
 
     # Notify patient
-    patient_user = db.query(User).filter(User.email == patient.email, User.role == "patient").first()
+    patient_user = db.query(User).filter(
+        User.role == "patient",
+        User.patient_id == patient.id,
+    ).first()
+    if not patient_user and patient.email:
+        patient_user = db.query(User).filter(User.email == patient.email, User.role == "patient").first()
     if patient_user:
         db.add(Notification(
             user_id=patient_user.id,
             title="New Consent Request",
             message=f"Dr. {current_user.full_name or current_user.email} requests access to your files. Reason: {body.reason}",
             type="consent_request",
-            link="/consent",
+            link=f"/consent?request_id={access_req.id}",
         ))
 
     log_audit_event(db=db, event_type="consent.request_created", user_id=current_user.id,
@@ -281,7 +305,12 @@ def emergency_override(
                           "emergency", expires, current_user.id)
 
     # Notify patient
-    patient_user = db.query(User).filter(User.email == patient.email, User.role == "patient").first()
+    patient_user = db.query(User).filter(
+        User.role == "patient",
+        User.patient_id == patient.id,
+    ).first()
+    if not patient_user and patient.email:
+        patient_user = db.query(User).filter(User.email == patient.email, User.role == "patient").first()
     if patient_user:
         db.add(Notification(
             user_id=patient_user.id,
@@ -361,9 +390,7 @@ def list_access_requests(
     query = db.query(AccessRequest)
 
     if current_user.role == "patient":
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if patient:
             query = query.filter(AccessRequest.patient_id == patient.id)
         else:
@@ -395,9 +422,7 @@ def pending_for_me(
     if current_user.role != "patient":
         raise HTTPException(status_code=403, detail="Only patients can view their pending requests")
 
-    patient = db.query(Patient).filter(
-        or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-    ).first()
+    patient = _resolve_patient_for_user(db, current_user)
     if not patient:
         return AccessRequestList(requests=[], total=0, page=page, page_size=page_size)
 
@@ -422,9 +447,7 @@ def get_access_request(
         raise HTTPException(status_code=404, detail="Access request not found")
 
     if current_user.role == "patient":
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if not patient or access_req.patient_id != patient.id:
             raise HTTPException(status_code=403, detail="Access denied")
 
@@ -448,13 +471,14 @@ def approve_access_request(
     if access_req.status != "pending":
         raise HTTPException(status_code=400, detail=f"Request is already {access_req.status}")
 
+    actor_patient_id = None
+
     # Permission check
     if current_user.role == "patient":
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if not patient or access_req.patient_id != patient.id:
             raise HTTPException(status_code=403, detail="You can only approve requests for your own records")
+        actor_patient_id = patient.id
     elif current_user.role not in ("doctor", "admin"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -489,7 +513,14 @@ def approve_access_request(
     log_audit_event(db=db, event_type="consent.request_approved", user_id=current_user.id,
                     user_role=current_user.role,
                     action=f"Approved request #{request_id} for patient ID {access_req.patient_id}",
-                    resource="access_request", resource_id=str(request_id), status="success", severity="medium")
+                    resource="access_request", resource_id=str(request_id), status="success", severity="medium",
+                    details={
+                        "request_id": request_id,
+                        "patient_id": access_req.patient_id,
+                        "requester_id": access_req.requester_id,
+                        "expires_days": expires_days,
+                        "actor_patient_id": actor_patient_id,
+                    })
     db.commit()
     db.refresh(access_req)
     return _format_request(access_req, db)
@@ -508,12 +539,15 @@ def deny_access_request(
     if access_req.status != "pending":
         raise HTTPException(status_code=400, detail=f"Request is already {access_req.status}")
 
+    actor_patient_id = None
+
     if current_user.role == "patient":
-        patient = db.query(Patient).filter(
-            or_(Patient.email == current_user.email, Patient.phone == current_user.phone)
-        ).first()
+        patient = _resolve_patient_for_user(db, current_user)
         if not patient or access_req.patient_id != patient.id:
             raise HTTPException(status_code=403, detail="You can only deny requests for your own records")
+        actor_patient_id = patient.id
+    elif current_user.role not in ("doctor", "admin"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     now = datetime.utcnow()
     access_req.status = "denied"
@@ -529,7 +563,13 @@ def deny_access_request(
 
     log_audit_event(db=db, event_type="consent.request_denied", user_id=current_user.id,
                     user_role=current_user.role, action=f"Denied request #{request_id}",
-                    resource="access_request", resource_id=str(request_id), status="success", severity="medium")
+                    resource="access_request", resource_id=str(request_id), status="success", severity="medium",
+                    details={
+                        "request_id": request_id,
+                        "patient_id": access_req.patient_id,
+                        "requester_id": access_req.requester_id,
+                        "actor_patient_id": actor_patient_id,
+                    })
     db.commit()
     db.refresh(access_req)
     return _format_request(access_req, db)
