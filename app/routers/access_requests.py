@@ -6,7 +6,7 @@ Workflow:
   2. Patient Access: Patients log in and see their medical files via /api/consent/my-files
   3. Patient Consent Granting: Patients grant consent for specific files
   4. Hospital Consent Requests: Hospitals/doctors send requests to patients
-  5. Emergency Override: Doctors override consent in emergencies (audit-logged)
+    5. Emergency Override: Doctors/admins override consent in emergencies (audit-logged)
   6. Proxy Approval: Doctors approve on behalf of patients without digital capabilities
 """
 import os
@@ -40,7 +40,7 @@ class ConsentRequestCreate(BaseModel):
 
 
 class EmergencyOverrideRequest(BaseModel):
-    """Doctor emergency override — bypasses patient consent (audit-logged)"""
+    """Doctor/admin emergency override — bypasses patient consent (audit-logged)"""
     patient_id: int
     file_ids: List[int]
     reason: str
@@ -267,12 +267,12 @@ def emergency_override(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Emergency override: Doctor bypasses patient consent.
+    Emergency override: Doctor/admin bypasses patient consent.
     Kenya DPA Section 35: lawful processing without consent for medical emergencies.
     Auto-approved, time-limited (24h), heavily audit-logged.
     """
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=403, detail="Only doctors can use emergency override")
+    if current_user.role not in ("doctor", "admin"):
+        raise HTTPException(status_code=403, detail="Only doctors and admins can use emergency override")
 
     patient = db.query(Patient).filter(Patient.id == body.patient_id).first()
     if not patient:
