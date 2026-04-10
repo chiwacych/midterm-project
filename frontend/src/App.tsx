@@ -10,6 +10,8 @@ import { ShareAccessPatient } from './pages/ShareAccessPatient'
 import { FederationNetwork } from './pages/FederationNetwork'
 import { AccountSettings } from './pages/AccountSettings'
 import { SetupPassword } from './pages/SetupPassword'
+import { DicomViewer } from './pages/DicomViewer'
+import { TwoFactorSetup } from './pages/TwoFactorSetup'
 import { useAuth } from './contexts/AuthContext'
 
 function App() {
@@ -40,8 +42,10 @@ function App() {
         {/* Patient-accessible routes */}
         <Route path="consent" element={<Consent />} />
         <Route path="settings" element={<AccountSettings />} />
+        <Route path="settings/2fa" element={<TwoFactorSetup />} />
         {/* Doctor/Admin only routes */}
         <Route path="files" element={<ProtectedRoute allowedRoles={['doctor', 'admin']}><FilesManager /></ProtectedRoute>} />
+        <Route path="dicom-viewer" element={<ProtectedRoute allowedRoles={['doctor', 'admin']}><DicomViewer /></ProtectedRoute>} />
         <Route path="share" element={<ProtectedRoute allowedRoles={['doctor', 'admin']}><ShareAccessPatient /></ProtectedRoute>} />
         <Route path="federation" element={<ProtectedRoute allowedRoles={['doctor', 'admin']}><FederationNetwork /></ProtectedRoute>} />
       </Route>

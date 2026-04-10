@@ -108,6 +108,7 @@ multipass list                    # get VM IPs
 |----------|-----|
 | Web UI | `http://<hospital-ip>:8000` |
 | API Docs (Swagger) | `http://<hospital-ip>:8000/docs` |
+| OHIF Local Viewer | `http://<hospital-ip>:8042/viewer` |
 | MinIO Console | `http://<hospital-ip>:9001` |
 
 **Default credentials** (seeded via `POST /api/auth/seed`):

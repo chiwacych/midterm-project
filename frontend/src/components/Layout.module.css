@@ -1,6 +1,7 @@
 .layout {
   display: flex;
   min-height: 100vh;
+  position: relative;
 }
 
 .sidebar {
@@ -9,6 +10,8 @@
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
+  z-index: 20;
 }
 
 .brand {
@@ -42,7 +45,7 @@
 .nav a:hover,
 .nav a:global(.active) {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(99, 102, 241, 0.12);
 }
 
 .user {
@@ -82,12 +85,83 @@
   flex: 1;
   padding: 1.5rem 2rem;
   overflow: auto;
+  min-width: 0;
 }
 
 .header {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
   margin-bottom: 1.5rem;
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--border);
+}
+
+.breadcrumbWrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.menuButton {
+  display: none;
+}
+
+.overlay {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 0 10px 35px rgba(0, 0, 0, 0.35);
+  }
+
+  .sidebarOpen {
+    transform: translateX(0);
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    z-index: 15;
+    display: block;
+  }
+
+  .overlayVisible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .main {
+    padding: 1rem;
+  }
+
+  .menuButton {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 2rem;
+    padding: 0 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
 }

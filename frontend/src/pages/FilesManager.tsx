@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   listFiles,
   uploadFile,
@@ -120,10 +121,14 @@ const css = {
 
 /* ── Component ─────────────────────────────────────────────── */
 export function FilesManager() {
+  const navigate = useNavigate()
   const [tab, setTab] = useState<Tab>('all')
 
   /* shared state */
   const [files, setFiles] = useState<FileInfo[]>([])
+  const [totalUploaded, setTotalUploaded] = useState(0)
+  const [page, setPage] = useState(1)
+  const pageSize = 20
   const [patients, setPatients] = useState<Patient[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -160,7 +165,19 @@ export function FilesManager() {
   const [filterSizeMax, setFilterSizeMax] = useState('')
   const [filterDateFrom, setFilterDateFrom] = useState('')
   const [filterDateTo, setFilterDateTo] = useState('')
-  const hasActiveFilters = !!(filterContentType || filterSizeMin || filterSizeMax || filterDateFrom || filterDateTo)
+  const [filterDicomModality, setFilterDicomModality] = useState('')
+  const [filterSeriesId, setFilterSeriesId] = useState('')
+  const [filterBodyPart, setFilterBodyPart] = useState('')
+  const hasActiveFilters = !!(
+    filterContentType ||
+    filterSizeMin ||
+    filterSizeMax ||
+    filterDateFrom ||
+    filterDateTo ||
+    filterDicomModality ||
+    filterSeriesId ||
+    filterBodyPart
+  )
 
   /* share dialog */
   const [shareFile, setShareFile] = useState<FileInfo | null>(null)
@@ -174,11 +191,43 @@ export function FilesManager() {
   const load = useCallback(() => {
     setLoading(true)
     Promise.all([
-      listFiles().then((d) => setFiles(d.files)),
-      listPatients().then(setPatients),
+      listFiles(undefined, {
+        page,
+        page_size: pageSize,
+        group_by_study: true,
+        search: search || undefined,
+        content_type: filterContentType || undefined,
+        size_min: filterSizeMin ? Number(filterSizeMin) * 1024 : undefined,
+        size_max: filterSizeMax ? Number(filterSizeMax) * 1024 : undefined,
+        date_from: filterDateFrom || undefined,
+        date_to: filterDateTo || undefined,
+        dicom_modality: filterDicomModality || undefined,
+        dicom_series_id: filterSeriesId || undefined,
+        dicom_body_part: filterBodyPart || undefined,
+      }).then((d) => {
+        setFiles(d.files)
+        setTotalUploaded(d.total)
+      }),
     ])
       .catch((e) => setError(e instanceof Error ? e.message : 'Load failed'))
       .finally(() => setLoading(false))
+  }, [
+    page,
+    search,
+    filterContentType,
+    filterSizeMin,
+    filterSizeMax,
+    filterDateFrom,
+    filterDateTo,
+    filterDicomModality,
+    filterSeriesId,
+    filterBodyPart,
+  ])
+
+  useEffect(() => {
+    listPatients()
+      .then(setPatients)
+      .catch(() => setPatients([]))
   }, [])
 
   useEffect(() => {
@@ -278,6 +327,13 @@ export function FilesManager() {
     startUpload(item)
   }
 
+  const buildDicomViewerPath = (f: Pick<FileInfo, 'id' | 'dicom_study_id' | 'dicom_series_id'>) => {
+    const params = new URLSearchParams({ fileId: String(f.id) })
+    if (f.dicom_study_id) params.set('studyUid', f.dicom_study_id)
+    if (f.dicom_series_id) params.set('seriesUid', f.dicom_series_id)
+    return `/dicom-viewer?${params.toString()}`
+  }
+
   /* ── Patient create ────────────────────────────────────── */
   const handleCreatePatient = async () => {
     if (!newPatient.full_name || !newPatient.date_of_birth) {
@@ -350,7 +406,12 @@ export function FilesManager() {
     setDetailLoading(true)
     try {
       const data = await api<{ file: FileInfo }>(`/files/${f.id}`)
-      setDetailFile(data.file)
+      setDetailFile({
+        ...data.file,
+        dicom_instance_count: f.dicom_instance_count,
+        grouped_file_ids: f.grouped_file_ids,
+        is_study_group: f.is_study_group,
+      })
     } catch {
       /* keep basic info */
     } finally {
@@ -359,15 +420,7 @@ export function FilesManager() {
   }
 
   /* ── Filtered files ────────────────────────────────────── */
-  const filtered = files.filter((f) => {
-    if (search && !f.filename.toLowerCase().includes(search.toLowerCase()) && !(f.description ?? '').toLowerCase().includes(search.toLowerCase())) return false
-    if (filterContentType && f.content_type !== filterContentType) return false
-    if (filterSizeMin && f.size < Number(filterSizeMin) * 1024) return false
-    if (filterSizeMax && f.size > Number(filterSizeMax) * 1024) return false
-    if (filterDateFrom && new Date(f.upload_timestamp) < new Date(filterDateFrom)) return false
-    if (filterDateTo && new Date(f.upload_timestamp) > new Date(filterDateTo + 'T23:59:59')) return false
-    return true
-  })
+  const filtered = files
 
   /* ── Shared files filtered by search (used in All Files tab) ─────── */
   // Exclude completed transfers: once a transfer is completed the file is stored
@@ -399,9 +452,19 @@ export function FilesManager() {
     return tsB - tsA // newest first
   })
 
+  const uploadedPages = Math.max(1, Math.ceil(totalUploaded / pageSize))
+
+  useEffect(() => {
+    if (page > uploadedPages) {
+      setPage(uploadedPages)
+    }
+  }, [page, uploadedPages])
+
   const clearFilters = () => {
     setFilterContentType(''); setFilterSizeMin(''); setFilterSizeMax('')
     setFilterDateFrom(''); setFilterDateTo(''); setSearch('')
+    setFilterDicomModality(''); setFilterSeriesId(''); setFilterBodyPart('')
+    setPage(1)
   }
 
   const queueStats = {
@@ -506,7 +569,10 @@ export function FilesManager() {
               <input
                 placeholder="Search files by name or description…"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value)
+                  setPage(1)
+                }}
                 style={{ ...css.input, padding: '0.6rem 1rem', flex: 1 }}
               />
               <button
@@ -532,7 +598,7 @@ export function FilesManager() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
                   <div>
                     <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>Content Type</label>
-                    <select value={filterContentType} onChange={e => setFilterContentType(e.target.value)} style={css.input}>
+                    <select value={filterContentType} onChange={e => { setFilterContentType(e.target.value); setPage(1) }} style={css.input}>
                       <option value="">All types</option>
                       <option value="application/dicom">DICOM</option>
                       <option value="image/jpeg">JPEG</option>
@@ -541,20 +607,32 @@ export function FilesManager() {
                     </select>
                   </div>
                   <div>
+                    <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>DICOM Modality</label>
+                    <input type="text" placeholder="CT / MRI / XR" value={filterDicomModality} onChange={e => { setFilterDicomModality(e.target.value.toUpperCase()); setPage(1) }} style={css.input} />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>DICOM Series UID</label>
+                    <input type="text" placeholder="SeriesInstanceUID" value={filterSeriesId} onChange={e => { setFilterSeriesId(e.target.value); setPage(1) }} style={css.input} />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>Body Part</label>
+                    <input type="text" placeholder="Chest, Abdomen..." value={filterBodyPart} onChange={e => { setFilterBodyPart(e.target.value); setPage(1) }} style={css.input} />
+                  </div>
+                  <div>
                     <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>Min Size (KB)</label>
-                    <input type="number" placeholder="0" value={filterSizeMin} onChange={e => setFilterSizeMin(e.target.value)} style={css.input} />
+                    <input type="number" placeholder="0" value={filterSizeMin} onChange={e => { setFilterSizeMin(e.target.value); setPage(1) }} style={css.input} />
                   </div>
                   <div>
                     <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>Max Size (KB)</label>
-                    <input type="number" placeholder="∞" value={filterSizeMax} onChange={e => setFilterSizeMax(e.target.value)} style={css.input} />
+                    <input type="number" placeholder="∞" value={filterSizeMax} onChange={e => { setFilterSizeMax(e.target.value); setPage(1) }} style={css.input} />
                   </div>
                   <div>
                     <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>From Date</label>
-                    <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} style={css.input} />
+                    <input type="date" value={filterDateFrom} onChange={e => { setFilterDateFrom(e.target.value); setPage(1) }} style={css.input} />
                   </div>
                   <div>
                     <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '.5px' }}>To Date</label>
-                    <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} style={css.input} />
+                    <input type="date" value={filterDateTo} onChange={e => { setFilterDateTo(e.target.value); setPage(1) }} style={css.input} />
                   </div>
                 </div>
               </div>
@@ -591,6 +669,8 @@ export function FilesManager() {
                     {combinedAll.map((entry) => {
                       if (entry.kind === 'uploaded') {
                         const f = entry.data
+                        const instanceCount = f.dicom_instance_count ?? 1
+                        const isStudyGroup = Boolean(f.is_study_group && instanceCount > 1)
                         return (
                           <tr
                             key={`u-${f.id}`}
@@ -615,6 +695,11 @@ export function FilesManager() {
                                 </span>
                                 <div>
                                   <div style={{ fontWeight: 500, fontSize: 14 }}>{f.filename}</div>
+                                  {isStudyGroup && (
+                                    <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 2, fontWeight: 600 }}>
+                                      {instanceCount} instances in one study
+                                    </div>
+                                  )}
                                   {f.description && (
                                     <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
                                       {f.description}
@@ -634,27 +719,44 @@ export function FilesManager() {
                             </td>
                             <td style={{ padding: '0.65rem 1rem' }} onClick={(e) => e.stopPropagation()}>
                               <div style={{ display: 'flex', gap: 6 }}>
-                                <button
-                                  title="Share to hospital"
-                                  onClick={() => openShareDialog(f)}
-                                  style={{ ...css.btn('primary'), padding: '0.3rem 0.6rem' }}
-                                >
-                                  ⇄
-                                </button>
-                                <button
-                                  title="Download"
-                                  onClick={() => downloadFile(f.id, f.filename).catch((e) => setError(e.message))}
-                                  style={{ ...css.btn('ghost'), padding: '0.3rem 0.6rem' }}
-                                >
-                                  ↓
-                                </button>
-                                <button
-                                  title="Delete"
-                                  onClick={() => onDelete(f.id, f.filename)}
-                                  style={{ ...css.btn('danger'), padding: '0.3rem 0.6rem' }}
-                                >
-                                  ✕
-                                </button>
+                                {isDicom(f.filename, f.content_type) && (
+                                  <button
+                                    title="Open DICOM Viewer"
+                                    onClick={() => navigate(buildDicomViewerPath(f))}
+                                    style={{ ...css.btn('ghost'), padding: '0.3rem 0.6rem' }}
+                                  >
+                                    View
+                                  </button>
+                                )}
+                                {!isStudyGroup ? (
+                                  <>
+                                    <button
+                                      title="Share to hospital"
+                                      onClick={() => openShareDialog(f)}
+                                      style={{ ...css.btn('primary'), padding: '0.3rem 0.6rem' }}
+                                    >
+                                      ⇄
+                                    </button>
+                                    <button
+                                      title="Download"
+                                      onClick={() => downloadFile(f.id, f.filename).catch((e) => setError(e.message))}
+                                      style={{ ...css.btn('ghost'), padding: '0.3rem 0.6rem' }}
+                                    >
+                                      ↓
+                                    </button>
+                                    <button
+                                      title="Delete"
+                                      onClick={() => onDelete(f.id, f.filename)}
+                                      style={{ ...css.btn('danger'), padding: '0.3rem 0.6rem' }}
+                                    >
+                                      ✕
+                                    </button>
+                                  </>
+                                ) : (
+                                  <span style={{ fontSize: 11, color: 'var(--muted)', alignSelf: 'center' }}>
+                                    Study grouped
+                                  </span>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -727,13 +829,38 @@ export function FilesManager() {
                   }}
                 >
                   <span>
-                    {combinedAll.length} file{combinedAll.length !== 1 ? 's' : ''}
-                    {filtered.length > 0 && filteredShared.length > 0 && ` (${filtered.length} uploaded, ${filteredShared.length} shared)`}
+                    {combinedAll.length} file{combinedAll.length !== 1 ? 's' : ''} on this page
+                    {filtered.length > 0 && filteredShared.length > 0 && ` (${filtered.length} uploaded + ${filteredShared.length} shared)`}
                     {search && ` matching "${search}"`}
                   </span>
                   <span>
-                    Total: {fmtSize(filtered.reduce((a, f) => a + f.size, 0) + filteredShared.reduce((a, t) => a + (t.file_size ?? 0), 0))}
+                    Uploaded rows: {files.length} / {totalUploaded}
                   </span>
+                </div>
+              )}
+
+              {!loading && totalUploaded > pageSize && (
+                <div
+                  style={{
+                    padding: '0.65rem 1rem',
+                    borderTop: '1px solid var(--border)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    Page {page} of {uploadedPages}
+                  </span>
+                  <div style={{ display: 'flex', gap: '0.45rem' }}>
+                    <button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} style={{ ...css.btn('ghost'), padding: '0.3rem 0.75rem' }}>
+                      Prev
+                    </button>
+                    <button disabled={page >= uploadedPages} onClick={() => setPage((value) => Math.min(uploadedPages, value + 1))} style={{ ...css.btn('ghost'), padding: '0.3rem 0.75rem' }}>
+                      Next
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -789,9 +916,13 @@ export function FilesManager() {
                       <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: 'var(--accent)' }}>
                         DICOM Metadata
                       </div>
+                      {(detailFile as FileInfo).dicom_instance_count && (detailFile as FileInfo).dicom_instance_count! > 1 && (
+                        <DetailRow label="Instances" value={String((detailFile as FileInfo).dicom_instance_count)} />
+                      )}
                       <DetailRow label="Modality" value={(detailFile as any).dicom_modality || '—'} />
                       <DetailRow label="Study ID" value={(detailFile as any).dicom_study_id || '—'} />
                       <DetailRow label="Series ID" value={(detailFile as any).dicom_series_id || '—'} />
+                      <DetailRow label="Body Part" value={(detailFile as any).dicom_body_part || '—'} />
                       <DetailRow
                         label="Study Date"
                         value={(detailFile as any).dicom_study_date || '—'}
@@ -800,6 +931,14 @@ export function FilesManager() {
                   )}
 
                   <div style={{ display: 'flex', gap: 8, marginTop: '1.25rem' }}>
+                    {isDicom(detailFile.filename, detailFile.content_type) && (
+                      <button
+                        onClick={() => navigate(buildDicomViewerPath(detailFile))}
+                        style={{ ...css.btn('ghost'), justifyContent: 'center' }}
+                      >
+                        View
+                      </button>
+                    )}
                     <button
                       onClick={() => openShareDialog(detailFile)}
                       style={{ ...css.btn('primary'), flex: 1, justifyContent: 'center' }}

@@ -276,6 +276,7 @@ services:
       - API_PORT=8000
     ports:
       - "8000:8000"
+      - "5000:8000"
     depends_on:
       kafka:
         condition: service_started
@@ -300,6 +301,21 @@ services:
       - ./frontend/dist:/app/frontend/dist:ro
       - ./certs:/certs:ro
       - fastapi-data:/app/data
+    networks:
+      - dfs-network
+    restart: unless-stopped
+
+  # Local OHIF Viewer (no external viewer.ohif.org dependency)
+  ohif:
+    image: ohif/viewer:latest
+    container_name: ohif-viewer
+    depends_on:
+      - fastapi
+    ports:
+      - "8042:80"
+    volumes:
+      - ./ohif/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ohif/app-config.js:/usr/share/nginx/html/app-config.js:ro
     networks:
       - dfs-network
     restart: unless-stopped

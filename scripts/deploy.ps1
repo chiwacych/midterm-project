@@ -150,6 +150,56 @@ function Get-HospitalVMs {
     return $vms
 }
 
+function Normalize-PeerList {
+    param(
+        [string[]]$PeerInput,
+        [string]$SelfHospital = ""
+    )
+
+    $normalized = @()
+    foreach ($raw in $PeerInput) {
+        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+
+        foreach ($candidate in ($raw -split ',')) {
+            $peer = $candidate.Trim().ToLower()
+            if ([string]::IsNullOrWhiteSpace($peer)) { continue }
+            if ($SelfHospital -and $peer -eq $SelfHospital) { continue }
+
+            if ($peer -notmatch '^hospital-[a-z0-9]+$') {
+                Write-Host "  ⚠ Ignoring invalid peer ID: $peer" -ForegroundColor Yellow
+                continue
+            }
+
+            $normalized += $peer
+        }
+    }
+
+    return @($normalized | Select-Object -Unique)
+}
+
+function Wait-HospitalReady {
+    param(
+        [string]$VMName,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            multipass exec $VMName -- bash -c "curl -fsS http://localhost/health >/dev/null || curl -fsS http://localhost:8000/health >/dev/null" | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                return $true
+            }
+        } catch {
+            # Service is still starting.
+        }
+
+        Start-Sleep -Seconds 5
+    }
+
+    return $false
+}
+
 function Deploy-Hospital {
     param(
         [hashtable]$Config
@@ -179,8 +229,13 @@ function Deploy-Hospital {
         multipass exec $Config.VM -- sudo bash "/home/ubuntu/medimage/start.sh"
         
         # Wait for services to be healthy
-        Write-Host "⏳ Waiting for services to initialize (30s)..." -ForegroundColor Gray
-        Start-Sleep -Seconds 30
+        Write-Host "⏳ Waiting for health endpoint (up to 3 minutes)..." -ForegroundColor Gray
+        $ready = Wait-HospitalReady -VMName $Config.VM -TimeoutSeconds 180
+        if ($ready) {
+            Write-Host "✓ Health endpoint is responding" -ForegroundColor Green
+        } else {
+            Write-Host "⚠ Health endpoint is not ready yet (services may still be warming up)" -ForegroundColor Yellow
+        }
         
         # Show access information
         $ip = Get-VMIP $Config.VM
@@ -188,6 +243,8 @@ function Deploy-Hospital {
             Write-Host "`n✅ $($Config.Name) is running!" -ForegroundColor Green
             Write-Host "   Web UI:       http://$ip" -ForegroundColor White
             Write-Host "   API:          http://$ip/api" -ForegroundColor White
+            Write-Host "   DICOM Viewer: http://$ip/dicom-viewer" -ForegroundColor White
+            Write-Host "   OHIF Local:   http://$ip:8042/viewer" -ForegroundColor White
             Write-Host "   Federation:   ${ip}:50051" -ForegroundColor White
             Write-Host "   Registry:     http://$ip/api/federation/registry/list" -ForegroundColor White
         }
@@ -220,7 +277,7 @@ if ($Hospital -eq "all" -or $Hospital -eq "both") {
     Write-Host ""
     
     foreach ($h in $allHospitals) {
-        $peerList = $allHospitals | Where-Object { $_ -ne $h }
+        $peerList = Normalize-PeerList -PeerInput ($allHospitals | Where-Object { $_ -ne $h }) -SelfHospital $h
         $config = Build-HospitalConfig -HospitalID $h -PeerList $peerList
         Deploy-Hospital -Config $config
     }
@@ -281,6 +338,11 @@ if ($Hospital -eq "all" -or $Hospital -eq "both") {
             Write-Host "🔍 Auto-discovered peers: $($Peers -join ', ')" -ForegroundColor Gray
         }
     }
+
+    $Peers = Normalize-PeerList -PeerInput $Peers -SelfHospital $Hospital
+    if ($Peers.Count -gt 0) {
+        Write-Host "🔗 Using peers: $($Peers -join ', ')" -ForegroundColor Gray
+    }
     
     $config = Build-HospitalConfig -HospitalID $Hospital -PeerList $Peers
     Deploy-Hospital -Config $config
@@ -294,6 +356,8 @@ if ($Hospital -eq "all" -or $Hospital -eq "both") {
         Write-Host "`n📋 Access Information:" -ForegroundColor Yellow
         Write-Host "  Web UI:       http://$ip" -ForegroundColor White
         Write-Host "  API Docs:     http://$ip/docs" -ForegroundColor White
+        Write-Host "  DICOM Viewer: http://$ip/dicom-viewer" -ForegroundColor White
+        Write-Host "  OHIF Local:   http://$ip:8042/viewer" -ForegroundColor White
         Write-Host "  Federation:   ${ip}:50051" -ForegroundColor White
         Write-Host ""
         Write-Host "🔗 Federation Registry:" -ForegroundColor Yellow
@@ -303,8 +367,8 @@ if ($Hospital -eq "all" -or $Hospital -eq "both") {
     }
     
     Write-Host "📖 Quick Commands:" -ForegroundColor Yellow
-    Write-Host "  Status:  multipass exec $($config.VM) -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml ps" -ForegroundColor Gray
-    Write-Host "  Logs:    multipass exec $($config.VM) -- sudo docker-compose -f /home/ubuntu/medimage/docker-compose.yml logs -f" -ForegroundColor Gray
+    Write-Host "  Status:  multipass exec $($config.VM) -- sudo docker compose -f /home/ubuntu/medimage/docker-compose.yml ps" -ForegroundColor Gray
+    Write-Host "  Logs:    multipass exec $($config.VM) -- sudo docker compose -f /home/ubuntu/medimage/docker-compose.yml logs -f" -ForegroundColor Gray
     Write-Host "  Shell:   multipass shell $($config.VM)" -ForegroundColor Gray
     Write-Host ""
 }

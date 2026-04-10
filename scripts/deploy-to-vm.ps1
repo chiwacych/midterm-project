@@ -63,7 +63,7 @@ if (-not $SkipBuild) {
 # Clean VM if requested
 if ($Clean) {
     Write-Host "`n🧹 Cleaning VM..." -ForegroundColor Yellow
-    multipass exec $VM -- bash -c "sudo docker-compose -f $VM_PATH/docker-compose.yml down -v 2>/dev/null || true"
+    multipass exec $VM -- bash -c "cd $VM_PATH && (sudo docker compose down -v 2>/dev/null || sudo docker-compose -f $VM_PATH/docker-compose.yml down -v 2>/dev/null || true)"
     multipass exec $VM -- bash -c "sudo rm -rf $VM_PATH 2>/dev/null || true"
     Write-Host "✓ VM cleaned" -ForegroundColor Green
 }
@@ -73,14 +73,19 @@ Write-Host "`n📁 Creating directory structure..." -ForegroundColor Yellow
 $dirs = @(
     "$VM_PATH",
     "$VM_PATH/app",
+    "$VM_PATH/app/data",
+    "$VM_PATH/app/migrations",
     "$VM_PATH/app/proto",
     "$VM_PATH/app/routers",
     "$VM_PATH/app/grpc_gen",
     "$VM_PATH/federation",
+    "$VM_PATH/federation/internal/kafka",
     "$VM_PATH/federation/internal/server",
     "$VM_PATH/federation/internal/p2p",
+    "$VM_PATH/federation/proto",
     "$VM_PATH/federation/pkg/federationv1",
     "$VM_PATH/frontend/dist",
+    "$VM_PATH/ohif",
     "$VM_PATH/certs",
     "$VM_PATH/nginx",
     "$VM_PATH/postgres-config",
@@ -111,12 +116,20 @@ Write-Host "  → FastAPI application..." -ForegroundColor Gray
 Transfer-Files "app/*.py" "$VM_PATH/app"
 Transfer-Files "app/*.txt" "$VM_PATH/app"
 Transfer-Files "app/Dockerfile" "$VM_PATH/app"
+Transfer-Files "app/migrations/*.sql" "$VM_PATH/app/migrations"
+Transfer-Files "app/migrations/*.sh" "$VM_PATH/app/migrations"
+Transfer-Files "app/migrations/*.md" "$VM_PATH/app/migrations"
 Transfer-Files "app/proto/*.py" "$VM_PATH/app/proto"
 Transfer-Files "app/routers/*.py" "$VM_PATH/app/routers"
 multipass exec $VM -- touch "$VM_PATH/app/grpc_gen/__init__.py" 2>$null
 # Copy canonical proto file into app build context for Docker protoc generation
 if (Test-Path "proto/federation.proto") {
     multipass transfer "proto/federation.proto" "${VM}:${VM_PATH}/app/proto/" 2>$null
+} elseif (Test-Path "app/proto/federation.proto") {
+    multipass transfer "app/proto/federation.proto" "${VM}:${VM_PATH}/app/proto/" 2>$null
+}
+if (Test-Path "app/data/federation-registry.json") {
+    multipass transfer "app/data/federation-registry.json" "${VM}:${VM_PATH}/app/data/" 2>$null
 }
 Write-Host "  ✓ FastAPI transferred" -ForegroundColor Green
 Write-Host "  → Federation registry & peer discovery..." -ForegroundColor Gray
@@ -134,6 +147,7 @@ Transfer-Files "federation/*.go" "$VM_PATH/federation"
 Transfer-Files "federation/go.mod" "$VM_PATH/federation"
 Transfer-Files "federation/go.sum" "$VM_PATH/federation"
 Transfer-Files "federation/Dockerfile" "$VM_PATH/federation"
+Transfer-Files "federation/internal/kafka/*.go" "$VM_PATH/federation/internal/kafka"
 Transfer-Files "federation/internal/server/*.go" "$VM_PATH/federation/internal/server"
 Transfer-Files "federation/internal/p2p/*.go" "$VM_PATH/federation/internal/p2p"
 Transfer-Files "federation/pkg/federationv1/*.go" "$VM_PATH/federation/pkg/federationv1"
@@ -141,12 +155,14 @@ Transfer-Files "federation/pkg/federationv1/*.go" "$VM_PATH/federation/pkg/feder
 if (Test-Path "proto/federation.proto") {
     multipass exec $VM -- mkdir -p "$VM_PATH/federation/proto" 2>$null
     multipass transfer "proto/federation.proto" "${VM}:${VM_PATH}/federation/proto/" 2>$null
+} elseif (Test-Path "federation/proto/federation.proto") {
+    multipass transfer "federation/proto/federation.proto" "${VM}:${VM_PATH}/federation/proto/" 2>$null
 }
 Write-Host "  ✓ Federation service transferred" -ForegroundColor Green
 
 # Frontend
 Write-Host "  → Frontend build..." -ForegroundColor Gray
-multipass exec $VM -- rm -rf "$VM_PATH/frontend/dist/*" 2>$null
+multipass exec $VM -- bash -c "rm -rf $VM_PATH/frontend/dist/*" 2>$null
 Get-ChildItem "frontend/dist" -Recurse | ForEach-Object {
     if ($_.PSIsContainer) {
         $relativePath = $_.FullName.Replace((Get-Item "frontend/dist").FullName, "").TrimStart("\")
@@ -158,6 +174,16 @@ Get-ChildItem "frontend/dist" -Recurse | ForEach-Object {
     }
 }
 Write-Host "  ✓ Frontend transferred" -ForegroundColor Green
+
+# OHIF local viewer config
+Write-Host "  → OHIF local viewer config..." -ForegroundColor Gray
+if (Test-Path "ohif/nginx.conf") {
+    multipass transfer "ohif/nginx.conf" "${VM}:${VM_PATH}/ohif/" 2>$null
+}
+if (Test-Path "ohif/app-config.js") {
+    multipass transfer "ohif/app-config.js" "${VM}:${VM_PATH}/ohif/" 2>$null
+}
+Write-Host "  ✓ OHIF config transferred" -ForegroundColor Green
 
 # Certificates
 Write-Host "  → mTLS certificates..." -ForegroundColor Gray
@@ -454,6 +480,7 @@ services:
 ${peerConfig}
     ports:
       - "8000:8000"
+      - "5000:8000"
     depends_on:
       kafka:
         condition: service_started
@@ -477,6 +504,21 @@ ${peerConfig}
       - ./certs:/certs:ro
       - ./frontend/dist:/app/frontend/dist:ro
       - fastapi-data:/app/data
+    networks:
+      - hospital-network
+    restart: unless-stopped
+
+  # Local OHIF Viewer
+  ohif:
+    image: ohif/viewer:latest
+    container_name: ohif-viewer
+    depends_on:
+      - fastapi
+    ports:
+      - "8042:80"
+    volumes:
+      - ./ohif/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ohif/app-config.js:/usr/share/nginx/html/app-config.js:ro
     networks:
       - hospital-network
     restart: unless-stopped
@@ -725,19 +767,34 @@ if ! command -v docker &> /dev/null; then
     echo "✓ Docker installed"
 fi
 
-# Install Docker Compose if needed
-if ! command -v docker-compose &> /dev/null; then
-    echo "📦 Installing Docker Compose..."
-    COMPOSE_VERSION=v2.24.0
-    ARCH=`$(uname -m)`
-    sudo curl -L "https://github.com/docker/compose/releases/download/`${COMPOSE_VERSION}/docker-compose-`$(uname -s)-`${ARCH}" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-    echo "✓ Docker Compose installed"
+# Resolve compose command (prefer Docker Compose plugin)
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE_CMD="docker compose"
+elif command -v docker-compose &> /dev/null; then
+  COMPOSE_CMD="docker-compose"
+else
+  echo "📦 Installing Docker Compose..."
+  COMPOSE_VERSION=v2.24.0
+  ARCH=`$(uname -m)`
+  sudo curl -L "https://github.com/docker/compose/releases/download/`${COMPOSE_VERSION}/docker-compose-`$(uname -s)-`${ARCH}" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose
+  COMPOSE_CMD="docker-compose"
+  echo "✓ Docker Compose installed"
 fi
+
+compose() {
+  if [ "`$COMPOSE_CMD" = "docker compose" ]; then
+    sudo docker compose "`$@"
+  else
+    sudo docker-compose "`$@"
+  fi
+}
+
+echo "✓ Using Compose command: `$COMPOSE_CMD"
 
 # Stop existing services
 echo "🛑 Stopping existing services..."
-sudo docker-compose down 2>/dev/null || true
+compose down 2>/dev/null || true
 
 # Build images
 echo ""
@@ -749,7 +806,7 @@ for ATTEMPT in 1 2 3; do
     echo "   ↻ Build retry `$ATTEMPT/3 (waiting 12s)..."
     sleep 12
   fi
-  if sudo docker-compose build --pull; then
+  if compose build --pull; then
     BUILD_OK=1
     break
   fi
@@ -758,7 +815,7 @@ done
 # Fallback: use local cache if registry pull is temporarily unavailable
 if [ `$BUILD_OK -ne 1 ]; then
   echo "   ⚠ Build with --pull failed, retrying without --pull..."
-  if sudo docker-compose build; then
+  if compose build; then
     BUILD_OK=1
   fi
 fi
@@ -773,7 +830,7 @@ fi
 # Start services
 echo ""
 echo "🚀 Starting services..."
-sudo docker-compose up -d
+compose up -d
 
 # Wait for health checks
 echo ""
@@ -893,7 +950,7 @@ set -e
 # Show status
 echo ""
 echo "📊 Service Status:"
-sudo docker-compose ps
+compose ps
 
 echo ""
 echo "=========================================="
@@ -912,6 +969,8 @@ echo "   Federation:   `${VM_IP}:50051"
 echo "   libp2p:       `${VM_IP}:4001"
 echo "   MinIO:        http://`${VM_IP}:9001"
 echo "   Prometheus:   http://`${VM_IP}:9090"
+echo "   DICOM Viewer: http://`${VM_IP}/dicom-viewer"
+echo "   OHIF Local:   http://`${VM_IP}:8042/viewer"
 echo ""
 echo "🔐 Security:"
 echo "   mTLS Enabled: Yes (TLS 1.3)"
@@ -933,16 +992,17 @@ try:
 except: print('   (not available yet)')
 " 2>/dev/null || echo "   (node info not available yet)"
 echo ""
-echo "� Federation Registry:"
+echo "Federation Registry:"
 echo "   Registry:     http://`${VM_IP}/api/federation/registry/list"
 echo "   Self-Register: curl -X POST http://`${VM_IP}/api/federation/registry/self-register"
 echo "   Discover Now: curl -X POST http://`${VM_IP}/api/federation/registry/discover-now"
 echo "   Auto-discovery runs every 5 minutes"
 echo ""
-echo "�📋 Useful Commands:"
-echo "   Logs:    sudo docker-compose logs -f [service]"
-echo "   Restart: sudo docker-compose restart [service]"
-echo "   Stop:    sudo docker-compose down"
+echo "Useful Commands:"
+echo "   Compose: sudo `$COMPOSE_CMD"
+echo "   Logs:    sudo `$COMPOSE_CMD logs -f [service]"
+echo "   Restart: sudo `$COMPOSE_CMD restart [service]"
+echo "   Stop:    sudo `$COMPOSE_CMD down"
 echo ""
 "@
 
@@ -960,16 +1020,24 @@ Write-Host "✓ Startup script created" -ForegroundColor Green
 # Generate peers.conf (libp2p seed peers for bootstrap)
 if ($Peers) {
     Write-Host "`n🔗 Generating peers.conf..." -ForegroundColor Yellow
-    $peerList = ($Peers -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-    $peersContent = ($peerList -join "`n") + "`n"
-    $peersFile = [System.IO.Path]::GetTempFileName()
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($peersFile, $peersContent.Replace("`r`n", "`n"), $utf8NoBom)
-    multipass transfer $peersFile "${VM}:${VM_PATH}/peers.conf" 2>`$null
-    multipass exec $VM -- bash -c "sed -i 's/\r$//' '$VM_PATH/peers.conf'" 2>`$null
-    Remove-Item $peersFile
-    Write-Host "  Seed peers: $($peerList -join ', ')" -ForegroundColor Gray
-    Write-Host "  ✓ peers.conf generated (peer exchange will discover the rest)" -ForegroundColor Green
+    $peerList = ($Peers -split ',') |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne '' -and $_ -ne $HospitalID } |
+        Select-Object -Unique
+
+    if ($peerList.Count -gt 0) {
+      $peersContent = ($peerList -join "`n") + "`n"
+      $peersFile = [System.IO.Path]::GetTempFileName()
+      $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+      [System.IO.File]::WriteAllText($peersFile, $peersContent.Replace("`r`n", "`n"), $utf8NoBom)
+      multipass transfer $peersFile "${VM}:${VM_PATH}/peers.conf" 2>$null
+      multipass exec $VM -- bash -c "sed -i 's/\r$//' '$VM_PATH/peers.conf'" 2>$null
+      Remove-Item $peersFile
+      Write-Host "  Seed peers: $($peerList -join ', ')" -ForegroundColor Gray
+      Write-Host "  ✓ peers.conf generated (peer exchange will discover the rest)" -ForegroundColor Green
+    } else {
+        Write-Host "  ℹ No valid external peers after filtering; skipping peers.conf" -ForegroundColor Gray
+    }
 } else {
     Write-Host "`nℹ No -Peers specified — skipping peers.conf (standalone node)" -ForegroundColor Gray
 }

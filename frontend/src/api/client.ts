@@ -38,15 +38,62 @@ export interface FileInfo {
   size: number
   content_type: string | null
   user_id: string
+  patient_id?: number | null
   upload_timestamp: string
   checksum: string | null
   description: string | null
+  dicom_study_id?: string | null
+  dicom_series_id?: string | null
+  dicom_modality?: string | null
+  dicom_study_date?: string | null
+  dicom_body_part?: string | null
+  dicom_instance_count?: number
+  grouped_file_ids?: number[]
+  is_study_group?: boolean
 }
 
-export async function listFiles(patientId?: number): Promise<{ files: FileInfo[] }> {
-  const query = patientId ? `?patient_id=${patientId}` : ''
-  const data = await api<{ status: string; files?: FileInfo[] }>(`/files${query}`)
-  return { files: data.files ?? [] }
+export interface ListFilesParams {
+  page?: number
+  page_size?: number
+  search?: string
+  content_type?: string
+  size_min?: number
+  size_max?: number
+  date_from?: string
+  date_to?: string
+  dicom_modality?: string
+  dicom_study_id?: string
+  dicom_series_id?: string
+  dicom_body_part?: string
+  group_by_study?: boolean
+}
+
+export interface ListFilesResponse {
+  files: FileInfo[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export async function listFiles(patientId?: number, params?: ListFilesParams): Promise<ListFilesResponse> {
+  const queryParams = new URLSearchParams()
+  if (patientId) queryParams.set('patient_id', String(patientId))
+  if (params) {
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        queryParams.set(key, String(value))
+      }
+    })
+  }
+  const query = queryParams.toString()
+  const data = await api<{ status: string; files?: FileInfo[]; total?: number; page?: number; page_size?: number }>(`/files${query ? `?${query}` : ''}`)
+  const files = data.files ?? []
+  return {
+    files,
+    total: data.total ?? files.length,
+    page: data.page ?? 1,
+    page_size: data.page_size ?? files.length,
+  }
 }
 
 export async function getFileInfo(fileId: number) {
@@ -396,6 +443,19 @@ export async function changePassword(currentPassword: string, newPassword: strin
 export async function toggle2FA(): Promise<{ two_factor_enabled: boolean }> {
   return api('/profile/2fa', {
     method: 'PUT',
+  })
+}
+
+export async function request2FAChallenge(): Promise<{ status: string; message: string; expires_in: number; otp_hint?: string }> {
+  return api('/profile/2fa/challenge', {
+    method: 'POST',
+  })
+}
+
+export async function verify2FA(code: string, enable: boolean): Promise<{ two_factor_enabled: boolean; message: string }> {
+  return api('/profile/2fa/verify', {
+    method: 'POST',
+    body: JSON.stringify({ code, enable }),
   })
 }
 

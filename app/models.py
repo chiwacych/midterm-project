@@ -113,6 +113,9 @@ class FileMetadata(Base):
     dicom_series_id = Column(String(100), index=True)
     dicom_modality = Column(String(50))  # CT, MRI, XR, etc.
     dicom_study_date = Column(Date)
+    # Per-instance identifiers — critical for OHIF WADO lookup and slice ordering
+    dicom_instance_uid = Column(String(100), index=True)   # SOPInstanceUID
+    dicom_instance_number = Column(Integer, nullable=True)  # InstanceNumber (slice order)
     
     def __repr__(self):
         return f"<FileMetadata(id={self.id}, filename='{self.filename}', patient_id={self.patient_id})>"
